@@ -4,7 +4,6 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { test } = require("node:test");
 const { setupPlaywright, resolveInstallation } = require("../skills/claude-codex-workflow/scripts/playwright");
 
 function fixture(options = {}) {

@@ -1,6 +1,5 @@
 "use strict";
 
-const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -409,7 +408,7 @@ const name = /UI AUDIT/.test(prompt) ? "ui" : "alignment";
 const start = Date.now();
 setTimeout(() => {
   fs.appendFileSync(${JSON.stringify(times)}, JSON.stringify({ name, args: process.argv.slice(2), prompt, start, end: Date.now() }) + "\\n");
-  const output = { result: name === "ui" ? "UI AUDIT: PASS" : "DONE: fallback\\nVERDICT: PASS", structured_output: ${structured} ? name === "ui" ? { checks: [{ item: "badge visible", viewport: "375", status: ${JSON.stringify(verdict)} === "NEEDS REWORK" ? "FAIL" : "PASS", evidence: "snapshot" }], risks: [], verdict: ${JSON.stringify(verdict)} } : { done: [{ item: "all", evidence: "src/label.js:1" }], partial: [], missing: [], outOfScope: [], handsOff: [], risks: [], verdict: ${JSON.stringify(verdict)} } : undefined };
+  const output = { result: name === "ui" ? "UI AUDIT: PASS" : "DONE: fallback\\nVERDICT: PASS", structured_output: ${structured} ? name === "ui" ? { checks: [{ item: "badge visible", viewport: "375", status: ${JSON.stringify(verdict)} === "NEEDS REWORK" ? "FAIL" : "PASS", evidence: "snapshot" }], risks: [], polish: ["tighten card spacing"], verdict: ${JSON.stringify(verdict)} } : { done: [{ item: "all", evidence: "src/label.js:1" }], partial: [], missing: [], outOfScope: [], handsOff: [], risks: [], verdict: ${JSON.stringify(verdict)} } : undefined };
   process.stdout.write(JSON.stringify(output));
   process.exit(${status});
 }, 100);
@@ -741,6 +740,9 @@ test("UI close makes one structured report-only audit, logs app startup and beco
   assert.ok(call.args.includes("mcp__playwright__browser_navigate"));
   assert.ok(call.args.includes("--disallowedTools"));
   assert.match(read(dir, ".codex/verify/fix-label/final-ui-audit.md"), /PASS: badge visible/);
+  assert.match(read(dir, ".codex/verify/fix-label/final-ui-audit.md"), /## Polish notes for Claude\r?\n- tighten card spacing/);
+  assert.match(call.prompt, /polish notes never fail the audit/);
+  assert.match(result.stdout, /Claude polishes the UI in its review/);
   assert.match(read(dir, ".codex/verify/fix-label/final-ui.app.log"), /ui app started/);
   assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/status.json")).state, "done");
 });

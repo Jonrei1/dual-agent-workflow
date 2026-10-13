@@ -6,7 +6,7 @@
 //
 //   node <plugin>/skills/claude-codex-workflow/scripts/install.js [flags]
 //   npx github:Jonrei1/Claude-Codex-Workflow [flags]
-//   /claude-codex-workflow:setup [flags]          (in Claude Code)
+//   /dual-agent-workflow:setup [flags]          (in Claude Code)
 //
 // 1. Tools: checks node, git, Claude Code, Codex CLI, Playwright and graphify, and installs the
 //    missing ones (global installs ask first unless --yes is given). Playwright MCP is
@@ -20,15 +20,17 @@
 //
 // It never modifies a file git tracks, so setting up the workflow leaves `git status` clean
 // and can't cause merge conflicts for teammates. When .codex/hooks.json is tracked, it's left
-// alone (an old workflow Stop hook in it is only pointed out). --shared restores the old,
-// team-wide layout (sections in CLAUDE.md and AGENTS.md, .gitignore entries, graphify's own
-// project install). The scripts under .codex/ belong to the workflow and are updated on every
-// run, so re-running the installer upgrades a project. Files an earlier version installed and
-// this one no longer ships are removed (tracked in .codex/workflow-manifest.json). It never
-// commits.
+// alone (an old workflow Stop hook or a broken Impeccable command in it is only pointed out).
+// --shared restores the old, team-wide layout (sections in CLAUDE.md and AGENTS.md, .gitignore
+// entries, graphify's own project install). The scripts under .codex/ belong to the workflow and
+// are updated on every run, so re-running the installer upgrades a project. Scripts an earlier
+// version installed and this one no longer ships are removed (listed in the untracked
+// .codex/workflow-manifest.json; only .codex/ script paths are ever removed). It never commits.
 //
 // The plugin also runs `install.js --sync` from a SessionStart hook, so a plugin update reaches
-// every project that already uses the workflow without re-running setup.
+// every project that already uses the workflow without re-running setup. Outside any repo, the
+// only files it writes are the Impeccable Codex plugin's cached hooks (Windows) and the old
+// workflow Stop hook's removal from ~/.codex/hooks.json.
 //
 // Flags:
 //   --sync                      quiet, files-only upgrade of an already-set-up project (used by the
@@ -65,10 +67,13 @@ const flagValue = (name) => {
 const isWindows = process.platform === "win32";
 const dryRun = flag("--dry-run");
 const sync = flag("--sync");
-let shared = flag("--shared");
+// Only an explicit --shared enables the team layout. A manifest never does: it could be
+// committed or planted, and sync must not start writing tracked files because of it.
+const shared = flag("--shared");
 let projectDir = "";
 const templates = path.join(__dirname, "..", "templates");
-const pluginVersion = readJson(path.join(__dirname, "..", "..", "..", "package.json"))?.version || "0.0.0";
+const pluginRoot = path.join(__dirname, "..", "..", "..");
+const pluginVersion = readJson(path.join(pluginRoot, "package.json"))?.version || readJson(path.join(pluginRoot, ".claude-plugin", "plugin.json"))?.version || "0.0.0";
 const MANIFEST = ".codex/workflow-manifest.json";
 // Scripts the workflow owns: always the plugin's version, and removed once a later version drops them.
 const OWNED = ["codex/hooks/claude-verify.js", "codex/hooks/workflow-lib.js", "codex/hooks/claude-plan-gate.js", "codex/autopilot.js"];
@@ -85,7 +90,7 @@ const notices = []; // one-line explanations --sync prints at session start
 
 function readJson(file) {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    return JSON.parse(readText(file));
   } catch {
     return null;
   }
@@ -263,32 +268,56 @@ function isTracked(root, rel) {
   return gitIn(root, ["ls-files", "--error-unmatch", "--", rel]).status === 0;
 }
 
-// Outside --shared, a file git tracks is never written: teammates would see the change, and
-// two developers setting up the workflow would get merge conflicts.
-function write(file, content, step, note, { allowTracked = false } = {}) {
-  if (!shared && projectDir && !allowTracked) {
-    const rel = path.relative(projectDir, file);
-    if (!rel.startsWith("..") && !path.isAbsolute(rel) && isTracked(projectDir, rel)) {
-      return record(step, false, "tracked by git, left unchanged (setup only writes local files; --shared allows it)");
+// A path inside the project, relative to it, or "" for a path outside (e.g. ~/.codex).
+function projectRel(file) {
+  if (!projectDir) return "";
+  const rel = path.relative(projectDir, file);
+  return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.replace(/\\/g, "/") : "";
+}
+
+// True when the path, or a folder on its way, is a symlink or junction: a write or delete
+// through it could land outside the repo.
+function throughLink(root, rel) {
+  let current = root;
+  for (const part of rel.split("/")) {
+    current = path.join(current, part);
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) return true;
+    } catch {
+      return false;
     }
   }
+  return false;
+}
+
+// Outside --shared, a file git tracks is never written: teammates would see the change, and
+// two developers setting up the workflow would get merge conflicts. The refusal is a notice,
+// not a failure, so the rest of the upgrade still completes.
+function write(file, content, step, note) {
+  const rel = projectRel(file);
+  if (rel && !shared && isTracked(projectDir, rel)) {
+    return record(step, null, "tracked by git, left unchanged (setup only writes local files; --shared allows it)");
+  }
+  if (rel && throughLink(projectDir, rel)) return record(step, false, "is reached through a symlink; left unchanged");
   if (dryRun) return record(step, null, `dry run, not written (${note})`);
+  // Write beside the target and rename, so a reader never sees a half-written script.
+  const temp = `${file}.${process.pid}.tmp`;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    // Write beside the target and rename, so a reader never sees a half-written script.
-    const temp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(temp, content);
     fs.renameSync(temp, file);
   } catch (error) {
+    fs.rmSync(temp, { force: true });
     return record(step, false, `couldn't write: ${error.message}`);
   }
   changed.push(step);
   record(step, true, note);
 }
 
-// Deletes a file an earlier version installed. Tracked files are never touched.
+// Deletes a file an earlier version installed. Tracked files and links are never touched.
 function remove(root, rel) {
-  if (!shared && isTracked(root, rel)) return record(rel, true, "stale, but tracked by git; left in place");
+  if (isTracked(root, rel)) return record(rel, null, "stale, but tracked by git; left in place");
+  if (throughLink(root, rel)) return record(rel, null, "stale, but reached through a symlink; left in place");
   if (dryRun) return record(rel, null, "dry run, stale file not removed");
   try {
     fs.rmSync(path.join(root, rel), { force: true });
@@ -299,9 +328,11 @@ function remove(root, rel) {
   record(rel, true, "stale file from an earlier version removed");
 }
 
+// Reads a text file without a UTF-8 BOM (Windows PowerShell 5.1 writes one, and JSON.parse
+// rejects it), or null when it can't be read.
 function readText(file) {
   try {
-    return fs.readFileSync(file, "utf8");
+    return fs.readFileSync(file, "utf8").replace(/^﻿/, "");
   } catch {
     return null;
   }
@@ -330,10 +361,15 @@ function copyManaged(root, from, to, previous) {
   record(to, true, "customized, kept");
 }
 
+// Only paths shaped like a script the plugin ships can be removed: a top-level .codex/*.js,
+// .codex/hooks/*.js or .codex/workflow/*.md. A manifest naming anything else (.env, .git/config,
+// a plan, a drive-relative or ".." path) is ignored, so a planted manifest can't delete files.
+const STALE_PATH = /^\.codex\/(?:hooks\/[\w-]+(?:\.[\w-]+)*\.js|workflow\/[\w-]+(?:\.[\w-]+)*\.md|[\w-]+(?:\.[\w-]+)*\.js)$/;
+
 // Deletes files an earlier version installed that this one no longer ships.
 function removeStale(root, previous, current) {
-  for (const file of previous.files || []) {
-    if (current.includes(file) || path.isAbsolute(file) || file.split(/[\\/]/).includes("..")) continue;
+  for (const file of Array.isArray(previous.files) ? previous.files : []) {
+    if (typeof file !== "string" || current.includes(file) || !STALE_PATH.test(file)) continue;
     if (readText(path.join(root, file)) !== null) remove(root, file);
   }
 }
@@ -361,8 +397,9 @@ function mergeSection(root, file, section, heading, { local = false } = {}) {
   if (text === null) return write(target, body, file, `created with the ${heading} section`);
   const range = sectionRange(text, heading);
   if (!range) return write(target, `${text.trimEnd()}\n\n${body}`, file, `appended the ${heading} section`);
-  if (text.slice(range.start, range.end).trim() === section.trim()) return record(file, true, `${heading} is up to date`);
-  if (!local && !sync && !flag("--update-sections")) {
+  const lf = (value) => value.replace(/\r\n/g, "\n").trim();
+  if (lf(text.slice(range.start, range.end)) === lf(section)) return record(file, true, `${heading} is up to date`);
+  if (!local && !flag("--update-sections")) {
     return record(file, true, `${heading} exists and differs from the plugin's; re-run with --update-sections to replace it`);
   }
   const updated = `${text.slice(0, range.start)}${body}${range.end < text.length ? "\n" : ""}${text.slice(range.end)}`;
@@ -387,27 +424,93 @@ function repairImpeccableHook(hook) {
   return true;
 }
 
-// Repairs the Impeccable hooks in a Codex hooks file and touches nothing else. A tracked file is
-// repaired too: the hook is broken for everyone who has it, and the change is only its
-// commandWindows line, which you can commit.
+// A tracked hooks file is never edited. Its broken Impeccable hook is reported with the exact
+// fix, for the team to commit.
+function trackedImpeccableNotice(step, count) {
+  const note = `tracked by git and has ${count} Impeccable Windows hook(s) that fail under PowerShell; left unchanged. Set their "commandWindows" to ${JSON.stringify(IMPECCABLE_WINDOWS)} and commit that with your team`;
+  record(step, null, note);
+  notices.push(`${step}: ${note}`);
+}
+
+// Repairs the Impeccable hooks in an untracked Codex hooks file and touches nothing else.
 function repairImpeccableHooks(file, step) {
-  const text = readText(file);
-  if (text === null || !text.includes("impeccable")) return;
-  let config;
+  const config = readJson(file);
+  if (!config?.hooks) return;
+  let repaired = 0;
+  for (const groups of Object.values(config.hooks)) {
+    for (const group of groups || []) for (const hook of group.hooks || []) if (repairImpeccableHook(hook)) repaired++;
+  }
+  if (!repaired) return;
+  const rel = projectRel(file);
+  if (rel && !shared && isTracked(projectDir, rel)) return trackedImpeccableNotice(step, repaired);
+  const note = `fixed ${repaired} Impeccable Windows hook(s) that failed on every event; trust the hooks again in Codex (/hooks)`;
+  write(file, JSON.stringify(config, null, 2) + "\n", step, note);
+  if (changed.includes(step)) notices.push(`${step}: ${note}`);
+}
+
+// The Impeccable Codex plugin ships POSIX-only hook commands (`[ ! -f ... ] || ... hook`) and no
+// Windows variant. Codex runs them through PowerShell on Windows, where that is a syntax error,
+// so they fail on every event. Each cached plugin version gets a small Node launcher instead.
+// The cache is per machine and outside every repo; an Impeccable update that brings the broken
+// commands back is repaired on the next setup or session start.
+const IMPECCABLE_PLUGIN_LAUNCHER = `"use strict";
+// Written by dual-agent-workflow. Runs Impeccable's hook launcher through Node, so the hook works
+// whether Codex uses PowerShell, cmd or sh. A launcher that is missing, can't start, or can't find
+// its engine (exit 127) is reported and skipped: that's a setup problem, not a design finding.
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+
+const windows = process.platform === "win32";
+const launcher = path.resolve(__dirname, "..", "skills", "impeccable", "scripts", windows ? "impeccable.cmd" : "impeccable");
+if (fs.existsSync(launcher)) {
+  const result = windows
+    ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", \`call "\${launcher}" hook\`], { stdio: "inherit", windowsHide: true, windowsVerbatimArguments: true })
+    : spawnSync(launcher, ["hook"], { stdio: "inherit" });
+  if (result.error) console.error(\`Impeccable hook skipped: \${result.error.message}\`);
+  else if (result.status === 127) console.error("Impeccable hook skipped: its engine isn't installed; run the launcher with engine-probe once.");
+  process.exitCode = result.error || result.status === 127 ? 0 : result.status ?? 0;
+}
+`;
+
+function repairImpeccablePlugin() {
+  if (!isWindows) return;
+  const base = path.join(codexHome(), "plugins", "cache", "impeccable", "impeccable");
+  let versions = [];
   try {
-    config = JSON.parse(text);
+    versions = fs.readdirSync(base, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
   } catch {
     return;
   }
-  let repaired = 0;
-  for (const groups of Object.values(config.hooks || {})) {
-    for (const group of groups) for (const hook of group.hooks || []) if (repairImpeccableHook(hook)) repaired++;
+  for (const version of versions) {
+    const hooksDir = path.join(base, version, "hooks");
+    const file = path.join(hooksDir, "hooks.json");
+    const config = readJson(file);
+    if (!config?.hooks) continue;
+    const launcher = path.join(hooksDir, "impeccable-hook.js");
+    const command = `node "${launcher.replace(/\\/g, "/")}"`;
+    let repaired = 0;
+    for (const groups of Object.values(config.hooks)) {
+      for (const group of groups || []) {
+        for (const hook of group.hooks || []) {
+          if (hook.type !== "command" || typeof hook.command !== "string") continue;
+          if (!/skills\/impeccable\/scripts\/impeccable\b|impeccable-hook\.js/.test(hook.command.replace(/\\/g, "/"))) continue;
+          if (hook.command === command && hook.commandWindows === undefined) continue;
+          hook.command = command;
+          delete hook.commandWindows;
+          repaired++;
+        }
+      }
+    }
+    const step = `~/.codex/plugins/cache/impeccable/impeccable/${version}/hooks`;
+    if (readText(launcher) !== IMPECCABLE_PLUGIN_LAUNCHER) {
+      write(launcher, IMPECCABLE_PLUGIN_LAUNCHER, `${step}/impeccable-hook.js`, "Node launcher for Impeccable's plugin hooks");
+    }
+    if (!repaired) continue;
+    const note = `${repaired} Impeccable plugin hook(s) now run through Node, so they work under PowerShell; trust the hooks again in Codex (/hooks)`;
+    write(file, JSON.stringify(config, null, 2) + "\n", `${step}/hooks.json`, note);
+    if (changed.includes(`${step}/hooks.json`)) notices.push(`Impeccable plugin ${version}: ${note}`);
   }
-  if (!repaired) return;
-  const tracked = projectDir && isTracked(projectDir, path.relative(projectDir, file));
-  const note = `fixed ${repaired} Impeccable Windows hook(s) that failed on every event${tracked ? "; the file is tracked, so commit the change" : ""}; trust the hooks again in Codex (/hooks)`;
-  write(file, JSON.stringify(config, null, 2) + "\n", step, note, { allowTracked: true });
-  if (changed.includes(step)) notices.push(`${step}: ${note}`);
 }
 
 // graphify may be installed at a full path; compare hook commands without it.
@@ -425,21 +528,24 @@ function mergeHooks(file, step, { graphify, events } = {}) {
     return record(step, false, "isn't valid JSON; merge templates/codex/hooks.json by hand");
   }
   config.hooks = config.hooks || {};
-  let repaired = 0;
+  let legacy = 0;
   for (const [event, groups] of Object.entries(config.hooks)) {
+    if (!Array.isArray(groups)) continue;
     config.hooks[event] = groups.map((group) => {
       const hooks = (group.hooks || []).filter((hook) => {
-        const remove = [hook.command, hook.commandWindows].some((command) => typeof command === "string" && command.includes("claude-verify.js"));
-        if (remove) repaired++;
-        return !remove;
+        const old = [hook.command, hook.commandWindows].some((command) => typeof command === "string" && command.includes("claude-verify.js"));
+        if (old) legacy++;
+        return !old;
       });
       return hooks.length === (group.hooks || []).length ? group : { ...group, hooks };
     }).filter((group) => (group.hooks || []).length);
     if (!config.hooks[event].length && groups.length) delete config.hooks[event];
   }
+  let impeccableFixes = 0;
   for (const groups of Object.values(config.hooks)) {
-    for (const group of groups) for (const hook of group.hooks || []) if (repairImpeccableHook(hook)) repaired++;
+    for (const group of Array.isArray(groups) ? groups : []) for (const hook of group.hooks || []) if (repairImpeccableHook(hook)) impeccableFixes++;
   }
+  const repaired = legacy + impeccableFixes;
   let added = 0;
   for (const [event, groups] of Object.entries(wanted.hooks)) {
     if (events && !events.includes(event)) continue;
@@ -453,9 +559,11 @@ function mergeHooks(file, step, { graphify, events } = {}) {
   }
   if (!added && !repaired) return record(step, true, "hooks up to date");
   // A tracked hooks file is only pointed out, never edited, like old sections in CLAUDE.md.
-  const rel = projectDir ? path.relative(projectDir, file) : "..";
-  if (!shared && !rel.startsWith("..") && !path.isAbsolute(rel) && isTracked(projectDir, rel)) {
-    return record(`${step} (old workflow)`, null, "still has the previous version's Stop hook (claude-verify.js), which does nothing now; it's tracked, so remove it together with your team when convenient");
+  const rel = projectRel(file);
+  if (rel && !shared && isTracked(projectDir, rel)) {
+    if (legacy) record(`${step} (old workflow)`, null, "still has the previous version's Stop hook (claude-verify.js), which does nothing now; it's tracked, so remove it together with your team when convenient");
+    if (impeccableFixes) trackedImpeccableNotice(step, impeccableFixes);
+    return;
   }
   write(file, JSON.stringify(config, null, 2) + "\n", step, `added ${added} hook group(s), updated ${repaired} hook(s); trust them again in Codex (/hooks)`);
 }
@@ -464,23 +572,27 @@ function codexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 }
 
-// The project's .codex/hooks.json when it's ours to change; a tracked one only gets its
-// Impeccable hooks repaired and is checked for the old Stop hook. An existing user-level
+// The project's .codex/hooks.json when it's ours to change; a tracked one is only checked
+// (old Stop hook, broken Impeccable command) and never edited. An existing user-level
 // ~/.codex/hooks.json loses the old Stop hook, if any.
 function mergeProjectHooks(root, graphify, label = "") {
   const rel = ".codex/hooks.json";
   const userFile = path.join(codexHome(), "hooks.json");
   if (fs.existsSync(userFile)) mergeHooks(userFile, `~/.codex/hooks.json${label}`, { events: [] });
   const tracked = !shared && isTracked(root, rel);
-  if (tracked) repairImpeccableHooks(path.join(root, rel), `${rel}${label}`);
   mergeHooks(path.join(root, rel), `${rel}${label}`, { graphify, events: tracked ? [] : undefined });
 }
 
 // Claude Code: a PostToolUse hook on ExitPlanMode that reminds Claude to confirm the role and
-// hand the plan off. settings.local.json is per-user, so teammates never see it.
+// hand the plan off. settings.local.json is per-user, so teammates never see it. The hook runs
+// .codex/hooks/claude-plan-gate.js, so it is only wired up when that script is ours: a tracked
+// copy can't be updated by the plugin and may not be what the plugin ships.
 function mergeClaudeSettings(root) {
   const rel = ".claude/settings.local.json";
   const file = path.join(root, rel);
+  if (!shared && isTracked(root, ".codex/hooks/claude-plan-gate.js")) {
+    return record(rel, null, ".codex/hooks/claude-plan-gate.js is tracked by git, so the plan handoff hook isn't added; ask Claude to confirm the implementer yourself");
+  }
   const command = "node -e \"const p=require('path').join(process.env.CLAUDE_PROJECT_DIR||process.cwd(),'.codex','hooks','claude-plan-gate.js');require('fs').existsSync(p)?require(p):console.log('{}')\"";
   const text = readText(file);
   let config;
@@ -519,17 +631,31 @@ function localPaths(root) {
     ".claude/settings.local.json",
     ".claude/skills/caveman/",
     ".agents/skills/caveman/",
+    // Impeccable's own installer writes these; hidden while untracked, like the rest.
+    ".agents/skills/impeccable/",
+    ".impeccable/",
     "graphify-out/",
   ];
 }
 
+// Adds the missing entries under the workflow's own heading: at the end of that block when it
+// exists (so upgrades don't stack a second heading), or as a new block at the end of the file.
 function appendBlock(file, step, heading, wanted) {
   const text = readText(file) || "";
-  const lines = text.split(/\r?\n/).map((line) => line.trim());
-  const missing = wanted.filter((line) => !lines.includes(line));
+  const lines = text.split(/\r?\n/);
+  const missing = wanted.filter((line) => !lines.some((existing) => existing.trim() === line));
   if (!missing.length) return record(step, true, "workflow entries present");
-  const block = `${text && !text.endsWith("\n") ? "\n" : ""}${text ? "\n" : ""}# ${heading}\n${missing.join("\n")}\n`;
-  write(file, text + block, step, `added ${missing.length} entr${missing.length === 1 ? "y" : "ies"}`);
+  const note = `added ${missing.length} entr${missing.length === 1 ? "y" : "ies"}`;
+  const at = lines.findIndex((line) => line.trim() === `# ${heading}`);
+  if (at === -1) {
+    const block = `${text && !text.endsWith("\n") ? "\n" : ""}${text ? "\n" : ""}# ${heading}\n${missing.join("\n")}\n`;
+    return write(file, text + block, step, note);
+  }
+  let end = at + 1;
+  while (end < lines.length && lines[end].trim() && !lines[end].startsWith("#")) end++;
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  lines.splice(end, 0, ...missing);
+  write(file, lines.join(eol), step, note);
 }
 
 function updateExclude(root) {
@@ -559,9 +685,13 @@ function migrateOldLayout(root) {
       record(`plans/${name}`, null, `would move to .codex/plans/${name}`);
       continue;
     }
-    fs.mkdirSync(path.dirname(to), { recursive: true });
-    fs.renameSync(path.join(oldPlans, name), to);
-    record(`plans/${name}`, true, `moved to .codex/plans/${name}`);
+    try {
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.renameSync(path.join(oldPlans, name), to);
+      record(`plans/${name}`, true, `moved to .codex/plans/${name}`);
+    } catch (error) {
+      record(`plans/${name}`, false, `couldn't move it to .codex/plans/: ${error.message}`);
+    }
   }
   if (shared) return;
   const old = [
@@ -594,10 +724,43 @@ function runStep(root, step, command, commandArgs) {
   record(step, result.status === 0, result.status === 0 ? "" : `\`${line}\` exited with ${result.status ?? "a timeout"}`);
 }
 
+// The manifest written by an earlier run. A committed one isn't trusted (anyone could have
+// written it), so it is treated as missing.
+function readManifest(root) {
+  if (isTracked(root, MANIFEST)) return null;
+  const manifest = readJson(path.join(root, MANIFEST));
+  return manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : null;
+}
+
+function setupIntegrations(root, graphify, impeccable) {
+  if (flag("--skip-graphify")) record("graphify install", null, "skipped (--skip-graphify)");
+  else if (!graphify && !dryRun) record("graphify install", false, "graphify isn't installed; re-run after installing it");
+  else if (!shared) record("graphify project install", null, "skipped: it edits shared CLAUDE.md/AGENTS.md. The graphify rules are in CLAUDE.local.md and .codex/workflow/CODEX.md, and its guard hooks in .codex/hooks.json");
+  else {
+    runStep(root, "graphify claude install", graphify || "graphify", ["claude", "install"]);
+    runStep(root, "graphify codex install", graphify || "graphify", ["codex", "install"]);
+    ensureGraphifyRule(root, "CLAUDE.md");
+    ensureGraphifyRule(root, "AGENTS.md");
+  }
+
+  if (!impeccable) {
+    record("impeccable install", null, flag("--skip-impeccable") ? "skipped (--skip-impeccable)" : "skipped (optional; re-run with --impeccable to add it)");
+    return;
+  }
+  const providers = flagValue("--impeccable-providers") || "claude,codex";
+  if (!shared) console.log("  Note: Impeccable's own installer writes project files (skills, hooks, PRODUCT.md/DESIGN.md). Its skill folders are hidden like the workflow's; review PRODUCT.md and DESIGN.md before committing them.");
+  runStep(root, "impeccable install", "npx", ["-y", "impeccable", "install", "--project", `--providers=${providers}`]);
+  // Impeccable merges its own hooks into .codex/hooks.json; make sure ours survived.
+  mergeProjectHooks(root, graphify, " (after Impeccable)");
+}
+
 function setupProject(root, graphify, impeccable) {
   projectDir = root;
   if (!sync) console.log(`\nProject: ${root} (${shared ? "shared layout (--shared)" : "local only: no tracked file is changed"})`);
-  const previous = readJson(path.join(root, MANIFEST)) || {};
+  const previous = readManifest(root) || {};
+  if (typeof previous.version === "string" && compareVersions(previous.version, pluginVersion) > 0) {
+    return record("project", false, `already uses workflow v${previous.version}, newer than this plugin (v${pluginVersion}); update the plugin instead of downgrading the project`);
+  }
   const ownedPaths = [...OWNED.map((file) => `.${file}`), CODEX_RULES];
   for (const file of OWNED) copyOwned(root, file, `.${file}`);
   const codexRules = fs.readFileSync(path.join(templates, "AGENTS.codex.md"), "utf8");
@@ -625,29 +788,8 @@ function setupProject(root, graphify, impeccable) {
   if (shared) updateGitignore(root);
   else updateExclude(root);
 
-  if (sync) {
-    // Files only: graphify and Impeccable are left as they are.
-  } else if (flag("--skip-graphify")) record("graphify install", null, "skipped (--skip-graphify)");
-  else if (!graphify && !dryRun) record("graphify install", false, "graphify isn't installed; re-run after installing it");
-  else if (!shared) record("graphify project install", null, "skipped: it edits shared CLAUDE.md/AGENTS.md. The graphify rules are in CLAUDE.local.md and .codex/workflow/CODEX.md, and its guard hooks in .codex/hooks.json");
-  else {
-    runStep(root, "graphify claude install", graphify || "graphify", ["claude", "install"]);
-    runStep(root, "graphify codex install", graphify || "graphify", ["codex", "install"]);
-    ensureGraphifyRule(root, "CLAUDE.md");
-    ensureGraphifyRule(root, "AGENTS.md");
-  }
-
-  if (sync) {
-    // handled above
-  } else if (!impeccable) {
-    record("impeccable install", null, flag("--skip-impeccable") ? "skipped (--skip-impeccable)" : "skipped (optional; re-run with --impeccable to add it)");
-  } else {
-    const providers = flagValue("--impeccable-providers") || "claude,codex";
-    if (!shared) console.log("  Note: Impeccable's own installer writes shared project files (skills, hooks, PRODUCT.md/DESIGN.md); review them before committing.");
-    runStep(root, "impeccable install", "npx", ["-y", "impeccable", "install", "--project", `--providers=${providers}`]);
-    // Impeccable merges its own hooks into .codex/hooks.json; make sure ours survived.
-    mergeProjectHooks(root, graphify, " (after Impeccable)");
-  }
+  // Sync is files only: graphify and Impeccable are left as they are.
+  if (!sync) setupIntegrations(root, graphify, impeccable);
 
   if (!dryRun && results.every((r) => r.ok !== false)) {
     const manifest = { version: pluginVersion, shared, files: ownedPaths, managed };
@@ -670,36 +812,50 @@ function projectRoot() {
 
 // Files-only upgrade for a project that already uses the workflow. Silent when there is
 // nothing to do, and never fails the session it runs in.
+// Never writes a tracked file, never runs tools or installers, and never takes a project set up
+// by a newer plugin back.
 function syncProject() {
+  // Independent of any project: the Impeccable Codex plugin's hooks fail on every Windows event.
+  repairImpeccablePlugin();
   const root = projectRoot();
   if (!root) return;
   // Independent of the workflow: a broken Impeccable hook fails on every Codex event.
   projectDir = root;
   repairImpeccableHooks(path.join(root, ".codex", "hooks.json"), ".codex/hooks.json");
   repairImpeccableHooks(path.join(codexHome(), "hooks.json"), "~/.codex/hooks.json");
-  const manifest = readJson(path.join(root, MANIFEST));
+  if (isTracked(root, MANIFEST)) {
+    notices.push(`${MANIFEST} is committed to git, so it isn't trusted and the project isn't synced. Remove it from git (git rm --cached ${MANIFEST}), then run /dual-agent-workflow:setup --project-only.`);
+    return;
+  }
+  const manifest = readManifest(root);
   if (!manifest) {
     if (readText(path.join(root, ".codex", "autopilot.js")) !== null) {
-      console.log("claude-codex-workflow: this project's workflow files predate automatic updates. Run /claude-codex-workflow:setup --project-only once to upgrade them.");
+      notices.push("this project's workflow files predate automatic updates. Run /dual-agent-workflow:setup --project-only once to upgrade them.");
     }
     return;
   }
   // A teammate on a newer plugin already upgraded this project; don't take it back.
-  if (manifest.version && compareVersions(manifest.version, pluginVersion) > 0) return;
-  shared = Boolean(manifest.shared);
+  if (typeof manifest.version === "string" && compareVersions(manifest.version, pluginVersion) > 0) return;
+  // The shared layout lives in tracked files, which sync never writes.
+  if (manifest.shared === true) {
+    if (compareVersions(manifest.version || "0", pluginVersion) < 0) {
+      notices.push(`this project uses the shared layout; run /dual-agent-workflow:setup --project-only --shared to upgrade it to v${pluginVersion}.`);
+    }
+    return;
+  }
   setupProject(root, "", false);
 }
 
 function announceChanges() {
-  for (const notice of notices) console.log(`claude-codex-workflow: ${notice}`);
+  for (const notice of new Set(notices)) console.log(`dual-agent-workflow: ${notice}`);
   const files = changed.filter((file) => file !== MANIFEST);
   if (files.length) {
     console.log(
-      `claude-codex-workflow v${pluginVersion}: updated ${files.length} project file(s) (${files.join(", ")}). ` +
+      `dual-agent-workflow v${pluginVersion}: updated ${files.length} file(s) (${files.join(", ")}). ` +
         "Restart Claude Code and Codex so the updated workflow applies.",
     );
   }
-  for (const r of results.filter((r) => r.ok === false)) console.log(`claude-codex-workflow sync: ${r.step}: ${r.note}`);
+  for (const r of results.filter((r) => r.ok === false)) console.log(`dual-agent-workflow sync: ${r.step}: ${r.note}`);
 }
 
 async function main() {
@@ -708,7 +864,7 @@ async function main() {
       syncProject();
       announceChanges();
     } catch (error) {
-      console.log(`claude-codex-workflow sync skipped: ${error.message}`);
+      console.log(`dual-agent-workflow sync skipped: ${error.message}`);
     }
     return;
   }
@@ -718,6 +874,7 @@ async function main() {
 
   const impeccable = doProject && (await wantsImpeccable());
   const graphify = doTools ? await installTools(impeccable) : findGraphify();
+  repairImpeccablePlugin();
   if (doProject) {
     const root = projectRoot();
     if (!root) {
@@ -740,7 +897,7 @@ Left for you:
 ${impeccable ? `  4. /impeccable init in Claude Code writes PRODUCT.md. In an existing project, follow with
      /impeccable document to capture DESIGN.md.` : `  4. Impeccable (design skills, optional) wasn't installed. For UI-heavy work, re-run with --impeccable.`}
   5. If the detected checks above are wrong or empty, add .codex/verify.json. For UI work, add its
-     "ui" block (startCommand, url, viewports, paths) so Claude can audit the app with Playwright.
+     "ui" block (startCommand, url, viewports) so Claude can audit the app with Playwright.
   6. Restart Claude Code (it loads CLAUDE.local.md and the plan hook) and check /mcp for Playwright.
 Then keep a Codex session open in this repo and plan a task with Claude. Claude asks who
 implements it; for Codex it sends the plan to that session itself and reviews the result.`);

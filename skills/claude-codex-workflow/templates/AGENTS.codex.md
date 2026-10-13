@@ -22,8 +22,9 @@ If a step is wrong or impossible, stop and report it; do not silently diverge.
      Exit 1 or 4: report the reason and end the turn. Three consecutive new gate/check
      failures or a failed alignment after two reworks stop the run as stuck.
 4. Run `node .codex/autopilot.js close .codex/plans/<task>.md`. For ui: yes it runs checks,
-   then one headless Playwright audit and writes .codex/verify/<task>/final-ui-audit.md.
-   Exit 2 or 3: fix within the union of phase scopes and run close again. A failed UI
+   then one headless functional Playwright audit and writes .codex/verify/<task>/final-ui-audit.md.
+   Exit 2 or 3: fix within the union of phase scopes and run close again. Only functional
+   failures need rework; its polish notes are for Claude, so leave them alone. A failed UI
    review after two reworks stops the run; BLOCKED is reported but does not fail close.
    Close runs graphify update . and marks done. Claude writes the task summary in its review.
 5. End with: `Task <task> done. Claude is reviewing it.`
@@ -48,6 +49,11 @@ Gates and project checks run first as a deduplicated, baseline-aware set, with b
 only green checks reach the report-only Claude alignment review. Codex fixes new failures.
 Run existing Playwright specs when gates/checks name them. The helper owns the browser audit.
 
+UI work: build a working frontend on the project's existing components and styles: data
+wiring, loading/empty/error states, forms, routing, semantic and labeled controls. Follow
+DESIGN.md tokens when present. Don't spend time on visual polish or new visual systems;
+Claude polishes the UI after close.
+
 ### Plan review
 Plan review is performed before handoff by `autopilot.js review`, using read-only Codex.
 Do not edit or reorder the plan or app code. Return findings with phase, problem, file/graph
@@ -55,9 +61,9 @@ evidence and proposed fix. Check missing files/dependents, test gates, acceptanc
 Hands off interfaces and risky ordering. Propose intermediate phases without renumbering.
 Return APPROVE or CHANGES NEEDED in the requested schema; Claude assesses findings with the user.
 
-If the impeccable skill is installed, use it for UI work and follow PRODUCT.md and DESIGN.md;
-run the design commands named by the plan. If it isn't installed, follow existing conventions.
-Never commit impeccable's live-mode block (impeccable-live-start through impeccable-live-end).
+Don't run impeccable design commands; Claude runs them while polishing. Follow PRODUCT.md and
+DESIGN.md when present, otherwise existing conventions. Never commit impeccable's live-mode
+block (impeccable-live-start through impeccable-live-end).
 Use graphify query, path and explain before reading many raw files. Do not update the graph
 between edits; the helper runs graphify update . once at close.
 

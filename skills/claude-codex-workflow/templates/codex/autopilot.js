@@ -36,7 +36,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 const lib = require("./hooks/workflow-lib");
 
 const valueFlags = new Set(["--thread", "--phase", "--since", "--timeout", "--wait", "--reason"]);
@@ -208,9 +208,9 @@ function verify(phase, phaseBase, preexisting = []) {
   const state = readJson(verifyStatePath) || {};
   const verdict = state.lastVerdict || "none";
   if (verdict === "NOT RUN") throw new Stop("failed", "the Claude verification didn't start; see .codex/verify/last.log");
-  log(`verdict: ${verdict} (alignment ${state.lastAlignment || "?"}, checks ${state.lastChecks || "?"}, UI audit ${state.lastUiAudit || "?"}; see .codex/verify/alignment.md)`);
+  log(`verdict: ${verdict} (alignment ${state.lastAlignment || "?"}, checks ${state.lastChecks || "?"}; see .codex/verify/alignment.md)`);
   const phases = { ...(status.phases || {}) };
-  phases[phase.id] = { verdict, alignment: state.lastAlignment, checks: state.lastChecks, ui: state.lastUiAudit, preexisting, reports: `${state.lastReports || ""}/phase-${phase.id}.*` };
+  phases[phase.id] = { verdict, alignment: state.lastAlignment, checks: state.lastChecks, preexisting, reports: `${state.lastReports || ""}/phase-${phase.id}.*` };
   setStatus({ phases });
   return verdict === "PASS";
 }
@@ -263,8 +263,9 @@ const uiDenied = ["Edit", "Write", "NotebookEdit", "Bash", "PowerShell", "mcp__p
 const uiSchema = {
   type: "object", properties: {
     checks: { type: "array", items: { type: "object", properties: { item: { type: "string" }, viewport: { type: "string" }, status: { type: "string", enum: ["PASS", "FAIL"] }, evidence: { type: "string" } }, required: ["item", "viewport", "status", "evidence"], additionalProperties: false } },
-    risks: { type: "array", items: { type: "string" } }, verdict: { type: "string", enum: ["PASS", "NEEDS REWORK", "BLOCKED"] },
-  }, required: ["checks", "risks", "verdict"], additionalProperties: false,
+    risks: { type: "array", items: { type: "string" } }, polish: { type: "array", items: { type: "string" } },
+    verdict: { type: "string", enum: ["PASS", "NEEDS REWORK", "BLOCKED"] },
+  }, required: ["checks", "risks", "polish", "verdict"], additionalProperties: false,
 };
 
 async function finalUiAudit(plan) {
@@ -280,13 +281,16 @@ async function finalUiAudit(plan) {
   if (!app.ok) return { verdict: "BLOCKED", report: app.note };
   try {
     const config = lib.verifyConfig(repoRoot).ui || {};
-    const prompt = `You are auditing a Codex implementation in a real browser. Do NOT edit any file.
-Use Playwright tools. At each viewport resize, navigate, snapshot, interact as needed and
-save screenshots of the states judged. Check every plan item, layout breaks, overflow,
-clipped text, overlaps, console errors, failed requests, focus states and unlabeled controls.
-Read DESIGN.md when present. Report per-check PASS or FAIL with evidence in the structured
-output. Use BLOCKED when the page cannot load. Any failed check means NEEDS REWORK.
-End text with UI AUDIT: PASS | NEEDS REWORK | BLOCKED for older clients.
+    const prompt = `You are auditing the functional result of a Codex implementation in a real
+browser. Do NOT edit any file. Use Playwright tools. At each viewport resize, navigate,
+snapshot, interact as needed and save screenshots of the states judged. Report per-check
+PASS or FAIL with evidence in the structured output. FAIL only for functional problems:
+a plan item that can't be achieved, layout that hides content or blocks interaction,
+console errors, failed requests, unlabeled or unreachable controls. Claude polishes the
+visuals afterwards, so record visual and UX issues (spacing, hierarchy, alignment,
+typography, color, copy, focus styling) as polish notes; polish notes never fail the audit.
+Read DESIGN.md when present. Use BLOCKED when the page cannot load. Any failed check means
+NEEDS REWORK. End text with UI AUDIT: PASS | NEEDS REWORK | BLOCKED for older clients.
 
 Plan: ${planRel}
 App URL: ${ui.url}
@@ -302,7 +306,9 @@ Checks:\n${ui.checks.map((item) => `- ${item}`).join("\n")}`;
     const verdicts = [...text.matchAll(/^[\s*_`>]*UI AUDIT:\s*(PASS|NEEDS REWORK|BLOCKED)/gim)];
     let verdict = result.error || result.status !== 0 ? "BLOCKED" : ["PASS", "NEEDS REWORK", "BLOCKED"].includes(structured?.verdict) ? structured.verdict : verdicts.at(-1)?.[1].toUpperCase() || "NEEDS REWORK";
     if (structured?.checks?.some((check) => check.status === "FAIL")) verdict = "NEEDS REWORK";
-    const report = structured ? [...(structured.checks || []).map((check) => `- ${check.status}: ${check.item} (${check.viewport}) ? ${check.evidence}`), ...(structured.risks || []).map((risk) => `- Risk: ${risk}`)].join("\n") : text;
+    const polish = structured?.polish || [];
+    const report = structured ? [...(structured.checks || []).map((check) => `- ${check.status}: ${check.item} (${check.viewport}) ? ${check.evidence}`), ...(structured.risks || []).map((risk) => `- Risk: ${risk}`),
+      ...(polish.length ? ["", "## Polish notes for Claude", ...polish.map((note) => `- ${note}`)] : [])].join("\n") : text;
     return { verdict, report: `${app.note}\n\n${report}` };
   } finally {
     if (app.child) lib.killTree(app.child.pid);
@@ -336,6 +342,7 @@ async function close() {
       console.log("Fix the final UI report within the union of phase scopes, then run close again.");
       return exitCodes.rework;
     }
+    console.log("Claude polishes the UI in its review.");
   }
   const graph = await lib.runShellAsync(repoRoot, "graphify update .", { timeout: callTimeoutMs, env: childEnv });
   log(graph.ok ? "graphify update . done" : `graphify update . failed; update the graph after fixing it: ${tail(graph.output, 1000)}`);
@@ -347,7 +354,7 @@ function printChecklist(plan) {
   console.log(`Plan: ${planRel} (risk: ${plan.meta.risk || "?"}, review: ${plan.meta.review || "none"}, ui: ${plan.meta.ui || "?"})\n`);
   for (const item of items) console.log(`  [${item.ok ? "x" : " "}] ${item.item}${item.ok || !item.detail ? "" : ` -- ${item.detail}`}`);
   for (const phase of plan.phases) {
-    console.log(`\nPhase ${phase.id}: ${phase.title}\n  covers: ${(phase.covers || []).join(", ") || "(none)"}\n  gate: ${phase.gates.join(" && ") || "(none)"}${phase.uiAudit ? "\n  UI audit: yes" : ""}`);
+    console.log(`\nPhase ${phase.id}: ${phase.title}\n  covers: ${(phase.covers || []).join(", ") || "(none)"}\n  gate: ${phase.gates.join(" && ") || "(none)"}`);
   }
   const failed = items.filter((item) => !item.ok);
   console.log(`\nPlan review: ${needsPlanReview(plan) ? "run autopilot.js review" : "no"}`);
@@ -473,14 +480,14 @@ function waitSummary(current, codexMessage = "") {
   for (const phase of readPlan().phases) {
     const result = phases[phase.id];
     const carried = result && result.preexisting && result.preexisting.length ? `; pre-existing failures carried over: ${result.preexisting.join(", ")}` : "";
-    lines.push(`  Phase ${phase.id} (${phase.title}): ${result ? `${result.verdict} (alignment ${result.alignment || "?"}, checks ${result.checks || "?"}, UI audit ${result.ui || "?"}${carried})` : "not verified"}`);
+    lines.push(`  Phase ${phase.id} (${phase.title}): ${result ? `${result.verdict} (alignment ${result.alignment || "?"}, checks ${result.checks || "?"}${carried})` : "not verified"}`);
   }
+  if (current.finalUiAudit) lines.push(`  Final UI audit: ${current.finalUiAudit}`);
   const baseline = lib.readBaseline(repoRoot, slug);
   const failingBefore = baseline ? Object.entries(baseline.commands || {}).filter(([, result]) => !result.ok).map(([cmd]) => cmd) : [];
   if (failingBefore.length) lines.push(`Already failing before the task (baseline, not caused by it): ${failingBefore.join(", ")}`);
   lines.push(`Reports: .codex/verify/${slug}/  (latest: .codex/verify/alignment.md, .codex/verify/last.log)`);
   lines.push(`Log: .codex/autopilot/${slug}.log`);
-  if (current.summary) lines.push(`Task summary: ${current.summary}`);
   if (current.startTree && lib.treeExists(repoRoot, current.startTree)) {
     const files = lib.changedFiles(repoRoot, current.startTree, snapshot(), lib.workflowPaths);
     lines.push(`Changed files (${files.length}):${files.length ? `\n  ${files.join("\n  ")}` : " none"}`);
@@ -622,7 +629,7 @@ async function cmdBegin() {
   assertPlanValid(plan);
   const start = snapshot();
   status = {};
-  setStatus({ slug, plan: planRel, driver: "codex", state: "running", reason: "", phase: "", step: "begin", attempt: 0, startTree: start, phases: {} });
+  setStatus({ slug, plan: planRel, state: "running", reason: "", phase: "", step: "begin", attempt: 0, startTree: start, phases: {} });
   log(`=== autopilot start (Codex-driven): ${planRel}`);
   if (lib.changedFiles(repoRoot, lib.headTree(repoRoot) || start, start).length) {
     log("note: the working tree already had uncommitted changes; they're part of the starting snapshot and won't be reviewed");

@@ -18,14 +18,9 @@ const statePath = path.join(stateDir, "state.json");
 const logPath = path.join(stateDir, "last.log");
 const alignmentPath = path.join(stateDir, "alignment.md");
 const diffPath = path.join(stateDir, "phase.diff");
-const diffRel = ".codex/verify/phase.diff";
 const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 const alignmentDefaults = { model: "sonnet", effort: "medium", riskModel: "opus", riskPaths: [] };
-
-function exists(name) {
-  return fs.existsSync(path.join(repoRoot, name));
-}
 
 function readText(name) {
   try {
@@ -202,8 +197,8 @@ async function runVerification() {
   fs.writeFileSync(alignmentPath, header);
   fs.copyFileSync(alignmentPath, path.join(taskDir, `${tag}.alignment.md`));
   writeState({ verifiedTree: verdict === "PASS" ? ctx.current : ctx.base.tree, verifiedHead: ctx.head,
-    lastVerdict: verdict, lastAlignment: alignment, lastChecks: "pass", lastUiAudit: "not run",
-    lastPlan: planLabel(ctx), lastTask: task, lastReports: path.relative(repoRoot, taskDir).split(path.sep).join("/") });
+    lastVerdict: verdict, lastAlignment: alignment, lastChecks: "pass",
+    lastReports: path.relative(repoRoot, taskDir).split(path.sep).join("/") });
   fs.appendFileSync(logPath, `Finished ${new Date().toISOString()} | Verdict: ${verdict}\n`);
 }
 

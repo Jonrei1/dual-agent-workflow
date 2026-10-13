@@ -1,6 +1,5 @@
 "use strict";
 
-const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -61,7 +60,7 @@ test("workflow instructions treat Impeccable as optional", () => {
   const claude = fs.readFileSync(path.join(templates, "CLAUDE.workflow.md"), "utf8");
   const agents = fs.readFileSync(path.join(templates, "AGENTS.codex.md"), "utf8");
   assert.match(claude, /Impeccable is optional/);
-  assert.match(agents, /If the impeccable skill is installed/);
+  assert.match(agents, /Don't run impeccable design commands; Claude runs them while polishing/);
 });
 
 test("setup repairs existing Impeccable Windows hooks and preserves other hooks on rerun", () => {

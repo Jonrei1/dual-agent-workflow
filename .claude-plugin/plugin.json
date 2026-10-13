@@ -1,7 +1,7 @@
 {
-  "name": "claude-codex-workflow",
-  "version": "3.0.0",
-  "description": "Set up the Claude + Codex workflow: one codex queue driver, checks before alignment, and one final Playwright UI audit. Installs Claude Code, Codex CLI, Playwright and graphify; Impeccable is optional. Workflow state stays local; legacy hooks are removed on upgrade.",
+  "name": "dual-agent-workflow",
+  "version": "3.1.0",
+  "description": "Claude + Codex as one team: Claude plans, reviews and polishes the UI; Codex builds the backend and a first working frontend; local scripts gate and verify every phase, with a functional Playwright audit at close. One command installs Claude Code, Codex CLI, Playwright and graphify (Impeccable optional). Local only: never edits tracked files; plugin updates sync projects automatically.",
   "author": {
     "name": "Jonrei",
     "url": "https://github.com/Jonrei1"

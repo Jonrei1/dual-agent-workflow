@@ -1,5 +1,5 @@
 ---
-name: claude-codex-workflow
+name: dual-agent-workflow
 description: >
   Set up the Claude + Codex workflow in a new or existing Git project: install tools,
   local rules, checks and the Codex queue handoff. Uses one execution driver, gates and
@@ -12,9 +12,13 @@ description: >
 Daily operation is documented in [README](../../README.md#daily-use-what-happens-during-a-task).
 Installed CLAUDE.local.md and .codex/workflow/CODEX.md own the agent instructions.
 There is one driver: the open Codex session reached by codex queue. Verify runs gates and
-project checks first, then one report-only alignment call. Close runs one UI audit for
-ui: yes and updates graphify; interactive Claude reads reports and writes the task summary.
+project checks first, then one report-only alignment call. Close runs one functional UI
+audit for ui: yes and updates graphify; interactive Claude reads reports and writes the task summary.
 Headless Claude calls = (phases + reworks) alignment, plus (1 + UI reworks) for ui: yes.
+Roles: Codex builds the backend and a first working frontend; Claude owns visual and UX
+quality. The audit fails only on functional problems and lists visual issues as polish
+notes; interactive Claude then runs one time-boxed UI polish pass on frontend files.
+Claude explores with 2-4 parallel haiku Explore subagents after graphify query.
 Plan review uses Codex usage through autopilot.js review before handoff.
 
 ## When invoked
@@ -28,7 +32,7 @@ Plan review uses Codex usage through autopilot.js review before handoff.
 4. Run `node <this skill's folder>/scripts/install.js` from the target project root with
    the chosen flags. A headless installer cannot prompt; report missing tools and ask
    before adding --yes unless tool installation is already authorized.
-5. Show created/merged/skipped steps, check git status, and explain any tracked hook cleanup.
+5. Show created/merged/skipped steps, check git status, and explain any tracked-file notices.
    Propose verify.json if checks are unsuitable, alignment.riskPaths for risky modules, and
    UI defaults (startCommand, url, viewports) for an app. Do not enable --shared unasked.
 6. List remaining setup steps below. Never commit, stage, stash or push user changes.
@@ -36,7 +40,7 @@ Plan review uses Codex usage through autopilot.js review before handoff.
 ## Setup
 
 ```
-/claude-codex-workflow:setup
+/dual-agent-workflow:setup
 npx github:Jonrei1/Claude-Codex-Workflow
 node <skill folder>/scripts/install.js
 ```
@@ -74,9 +78,11 @@ have a manifest, so no re-run is needed.
 
 ### Project files
 
-Workflow state is local through .git/info/exclude. Tracked team rules are left alone unless
---shared is requested. Upgrade cleanup of legacy workflow hooks can change a tracked project
-hooks file; unrelated hooks are preserved. See the [v3 upgrade note](../../README.md#upgrading-from-2x).
+Workflow state is local through .git/info/exclude. Setup and sync never write or delete a
+tracked file (outside --shared): a tracked hooks file with the legacy Stop hook or a broken
+Impeccable command is only reported, with the fix. Stale-script removal is limited to
+.codex/*.js, .codex/hooks/*.js and .codex/workflow/*.md; a committed manifest is ignored, and
+shared-layout projects aren't synced. See the [v3 upgrade note](../../README.md#upgrading-from-2x).
 
 | Template | Destination | Action |
 |---|---|---|
@@ -118,6 +124,7 @@ The plan's gates join these checks, deduplicated and compared against the begin 
 New failures return to Codex without a model call. The alignment review is read-only,
 uses structured verdicts with a text fallback and caps at 40 turns. High risk uses Opus.
 The final UI audit uses Playwright with write/code-execution tools denied and caps at 80 turns.
+It fails only functional checks; visual issues go to "Polish notes for Claude" in final-ui-audit.md.
 Configure checks, parallelChecks, baseline, alignment, ui, handoff and headless in verify.json;
 see [the complete example](../../README.md#configure-verification). Inspect commands with
 `node .codex/hooks/claude-verify.js --print-checks`.
@@ -146,9 +153,12 @@ Single-phase handoffs pause after intermediate PASS and wait prints the next han
 - Missing tools: check PATH/authentication, then re-run setup with authorized installation flags.
 - Old workflow still runs: start a new session after a plugin update (SessionStart runs --sync)
   or run setup --project-only once if there is no workflow-manifest.json; restart both CLIs.
-- Codex hook fails on every event on Windows: Impeccable's `if exist (...)` command breaks under
-  PowerShell. Setup and --sync rewrite it to `cmd.exe /d /c`, even in a tracked
-  .codex/hooks.json (commit that change); trust the hooks again with /hooks.
+- Codex hook fails on every event on Windows: Impeccable's POSIX/`if exist (...)` commands break
+  under PowerShell. Setup and --sync point the Impeccable Codex plugin's cached hooks at a Node
+  launcher and rewrite untracked .codex/hooks.json to `cmd.exe /d /c`; a tracked one is only
+  reported with the value to commit. Trust the hooks again with /hooks.
+- "Committed manifest isn't trusted": git rm --cached .codex/workflow-manifest.json, run setup.
+- "Newer than this plugin": update the plugin; setup and sync never downgrade a project.
 - Paste fallback: keep Codex open in the repo or pin --thread; queue/app-server is experimental.
 - Failed/stuck: read status/logs and alignment.md, fix the blocker, then handoff --continue.
 - UI BLOCKED: inspect final-ui.app.log, app URL/start command, Playwright and Chromium setup.

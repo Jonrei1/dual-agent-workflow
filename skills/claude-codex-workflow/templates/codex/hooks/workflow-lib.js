@@ -27,8 +27,6 @@ const git = isWindows ? "git.exe" : "git";
 
 // Workflow locations, relative to the repo root.
 const plansRel = ".codex/plans";
-const tasksRel = ".codex/tasks";
-const verifyRel = ".codex/verify";
 const codexRulesRel = ".codex/workflow/CODEX.md";
 const planPattern = /^\.codex\/plans\/[^/]+\.md$/;
 
@@ -125,9 +123,8 @@ function labelBlock(body, label) {
   return match ? match[1].trim() : null;
 }
 
-// Phases in document order: { id, title, body, gates, commit, scope, steps, covers,
-// doneWhen, handsOff, uiAudit }. The first backticked span on each bullet under **Gate** is
-// a command. `commit` is the optional suggested commit message for the user.
+// Phases in document order: { id, title, body, gates, scope, steps, covers, doneWhen,
+// handsOff }. The first backticked span on each bullet under **Gate** is a command.
 function parsePhases(text) {
   const headings = [...text.matchAll(/^## Phase ([\w.]+):\s*(.+)$/gm)];
   return headings.map((heading, i) => {
@@ -142,20 +139,17 @@ function parsePhases(text) {
         if (command) gates.push(command[1].trim());
       }
     }
-    const commit = /\*\*(?:Suggested )?[Cc]ommit[^*]*:\*\*\s*`([^`]+)`/.exec(body);
     const covers = labelBlock(body, "Covers");
     return {
       id: heading[1],
       title: heading[2].trim(),
       body,
       gates,
-      commit: commit ? commit[1].trim() : "",
       scope: labelBlock(body, "Scope"),
       steps: labelBlock(body, "Steps"),
       covers: covers === null ? null : [...covers.matchAll(/\bA\d+\b/g)].map((m) => m[0]),
       doneWhen: labelBlock(body, "Done when"),
       handsOff: labelBlock(body, "Hands off"),
-      uiAudit: labelBlock(body, "UI audit"),
     };
   });
 }
@@ -316,7 +310,7 @@ function planProblems(repoRoot, slug, text) {
 
 // ---- Headless Claude calls -------------------------------------------------------------
 //
-// Every headless call goes through runClaude / runClaudeAsync, so all of them get the same
+// Every headless call goes through runClaudeAsync, so all of them get the same
 // trimmed setup and the same usage record. Listing only the built-in tools a call needs
 // (--tools) cuts its fixed input from about 37k to 14k tokens, and --strict-mcp-config keeps
 // MCP tool schemas out unless the call passes its own --mcp-config (the UI audit's
@@ -381,7 +375,7 @@ function resolveClaude() {
   return claudeCommand;
 }
 
-function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], permissionMode, mcpConfig, jsonSchema, maxTurns }) {
+function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], mcpConfig, jsonSchema, maxTurns }) {
   const claude = resolveClaude();
   const args = [
     ...claude.prefix,
@@ -396,7 +390,6 @@ function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], per
   if (jsonSchema) args.push("--json-schema", JSON.stringify(jsonSchema));
   if (maxTurns) args.push("--max-turns", String(maxTurns));
   if (mcpConfig) args.push("--mcp-config", mcpConfig);
-  if (permissionMode) args.push("--permission-mode", permissionMode);
   const { settingSources } = headlessConfig(repoRoot);
   if (settingSources) args.push("--setting-sources", String(settingSources));
   // The variadic flags go last so they can't swallow another option.
@@ -424,28 +417,18 @@ function finishClaude(repoRoot, options, result) {
   return { status: result.status, error: result.error, structured: parsed?.structured_output, text, stderr: (result.stderr || "").trim() };
 }
 
-// Runs `claude -p` and returns { status, error, text, stderr }. `text` is the model's final
-// reply, taken from the JSON result; if the output isn't JSON, it falls back to raw stdout.
-function runClaude(repoRoot, options) {
-  const { command, args } = claudeArgs(repoRoot, options);
-  const result = spawnSync(command, args, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    windowsHide: true,
-    maxBuffer: 256 * 1024 * 1024,
-    ...(options.env ? { env: options.env } : {}),
-    ...(options.timeout ? { timeout: options.timeout } : {}),
-  });
-  return finishClaude(repoRoot, options, result);
-}
-
-// The same call without blocking, so independent review steps can run side by side.
+// Runs `claude -p` without blocking, so independent review steps can run side by side, and
+// resolves { status, error, structured, text, stderr }. `text` is the model's final reply,
+// taken from the JSON result; if the output isn't JSON, it falls back to raw stdout.
 function runClaudeAsync(repoRoot, options) {
   const { command, args } = claudeArgs(repoRoot, options);
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let settled = false;
+    // Declared before `done`: spawn can throw synchronously (on Windows, for example), and
+    // `done` then runs before any timer exists.
+    let timer = null;
     const done = (result) => {
       if (settled) return;
       settled = true;
@@ -459,7 +442,7 @@ function runClaudeAsync(repoRoot, options) {
       done({ status: null, error });
       return;
     }
-    const timer = options.timeout
+    timer = options.timeout
       ? setTimeout(() => {
           child.kill();
           done({ status: null, error: Object.assign(new Error(`timed out after ${options.timeout} ms`), { code: "ETIMEDOUT" }) });
@@ -477,14 +460,21 @@ function runShellAsync(repoRoot, cmd, { timeout, env } = {}) {
   return new Promise((resolve) => {
     let output = "";
     let settled = false;
-    const child = spawn(cmd, { cwd: repoRoot, shell: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
+    let timer = null;
     const finish = (ok, status) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve({ cmd, ok, status, output: output.trim() });
     };
-    const timer = timeout ? setTimeout(() => { killTree(child.pid); finish(false, "timed out"); }, timeout) : null;
+    let child;
+    try {
+      child = spawn(cmd, { cwd: repoRoot, shell: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
+    } catch (error) {
+      finish(false, error.message);
+      return;
+    }
+    timer = timeout ? setTimeout(() => { killTree(child.pid); finish(false, "timed out"); }, timeout) : null;
     child.stdout.setEncoding("utf8").on("data", (chunk) => (output += chunk));
     child.stderr.setEncoding("utf8").on("data", (chunk) => (output += chunk));
     child.on("error", (error) => finish(false, error.message));
@@ -755,6 +745,7 @@ function codexAppServer(calls, { timeoutMs = 10000, env } = {}) {
     let upgraded = false;
     let nextId = 0;
     const pending = new Map();
+    let timer = null;
     const finish = (value) => {
       if (settled) return;
       settled = true;
@@ -767,7 +758,7 @@ function codexAppServer(calls, { timeoutMs = 10000, env } = {}) {
       }
       resolve(value);
     };
-    const timer = setTimeout(() => finish({ error: `no answer from the Codex app-server within ${timeoutMs / 1000}s` }), timeoutMs);
+    timer = setTimeout(() => finish({ error: `no answer from the Codex app-server within ${timeoutMs / 1000}s` }), timeoutMs);
     const send = (message) => child.stdin.write(encodeFrame(JSON.stringify(message)));
     const request = (method, params) =>
       new Promise((resolveCall, rejectCall) => {
@@ -791,7 +782,7 @@ function codexAppServer(calls, { timeoutMs = 10000, env } = {}) {
     };
     const run = async () => {
       try {
-        const init = await request("initialize", { clientInfo: { name: "claude-codex-workflow", version: "1" } });
+        const init = await request("initialize", { clientInfo: { name: "dual-agent-workflow", version: "1" } });
         if (init.error) return finish({ error: `initialize failed: ${init.error.message || JSON.stringify(init.error)}` });
         send({ method: "initialized" });
         const results = [];
@@ -969,20 +960,14 @@ async function ensureApp(repoRoot, ui, logFile) {
 
 module.exports = {
   ensureApp,
-  responds,
   plansRel,
-  tasksRel,
-  verifyRel,
   codexRulesRel,
   planPattern,
-  runClaude,
   runClaudeAsync,
   runShellAsync,
   killTree,
   usageSummary,
   workflowPaths,
-  triggerIgnored,
-  gitRun,
   gitOut,
   treeExists,
   snapshot,
@@ -990,13 +975,9 @@ module.exports = {
   changedFiles,
   diffText,
   taskVerifyDir,
-  readJsonFile,
   verifyConfig,
   frontmatter,
-  isPlaceholder,
   parsePhases,
-  acceptanceIds,
-  uiAuditSpec,
   uiSettings,
   gateProblem,
   planChecklist,
@@ -1011,8 +992,6 @@ module.exports = {
   classifyFailure,
   encodeFrame,
   decodeFrames,
-  codexAppServer,
-  liveCodexThreads,
   pickCodexSession,
   codexThreadState,
   findCodexSession,

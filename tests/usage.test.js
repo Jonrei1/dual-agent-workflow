@@ -1,6 +1,5 @@
 "use strict";
 
-const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -74,6 +73,9 @@ test("v3 documentation and templates describe the single-driver protocol", () =>
   assert.ok(claude.trimEnd().split(/\r?\n/).length <= 70);
   assert.ok(/```md\n([\s\S]*?)```/.exec(claude)[1].trimEnd().split("\n").length <= 25);
   for (const term of ["AskUserQuestion", "manual phases", "review", "handoff", "wait", "final-ui-audit.md", ".codex/tasks/", "git commit"]) assert.ok(claude.includes(term), term);
+  for (const term of ['model: "haiku"', "### UI polish", "Polish notes for Claude", "frontend files only"]) assert.ok(claude.includes(term), term);
+  const codex = fs.readFileSync(path.join(templates, "AGENTS.codex.md"), "utf8");
+  assert.match(codex, /Claude polishes the UI after close/);
   const gate = fs.readFileSync(path.join(templates, "codex", "hooks", "claude-plan-gate.js"), "utf8");
   assert.ok(/const context = `([\s\S]*?)`;/.exec(gate)[1].split("\n").length <= 5);
   for (const file of docs.slice(0, 2)) {
@@ -81,5 +83,5 @@ test("v3 documentation and templates describe the single-driver protocol", () =>
     assert.match(text, /phases \+ reworks/);
     assert.match(text, /1 \+ UI reworks/);
   }
-  for (const file of ["package.json", ".claude-plugin/plugin.json"]) assert.strictEqual(JSON.parse(fs.readFileSync(path.join(repo, file), "utf8")).version, "3.0.0");
+  for (const file of ["package.json", ".claude-plugin/plugin.json"]) assert.strictEqual(JSON.parse(fs.readFileSync(path.join(repo, file), "utf8")).version, "3.1.0");
 });
