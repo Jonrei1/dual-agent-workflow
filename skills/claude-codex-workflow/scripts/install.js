@@ -19,8 +19,8 @@
 //    installed only with --impeccable, or when you answer yes to the prompt.
 //
 // It never modifies a file git tracks, so setting up the workflow leaves `git status` clean
-// and can't cause merge conflicts for teammates. When .codex/hooks.json is tracked, the Stop
-// hook goes into the user-level ~/.codex/hooks.json instead. --shared restores the old,
+// and can't cause merge conflicts for teammates. When .codex/hooks.json is tracked, it's left
+// alone (an old workflow Stop hook in it is only pointed out). --shared restores the old,
 // team-wide layout (sections in CLAUDE.md and AGENTS.md, .gitignore entries, graphify's own
 // project install). The scripts under .codex/ belong to the workflow and are updated on every
 // run, so re-running the installer upgrades a project. It never commits.
@@ -297,7 +297,7 @@ function mergeSection(root, file, section, heading, { local = false } = {}) {
 }
 
 // Merges the template hook groups into a Codex hooks file. Groups whose commands are already
-// present are skipped, an older workflow Stop command is upgraded in place, and Impeccable's
+// present are skipped, hooks from the old workflow Stop hook (claude-verify.js) are removed, and Impeccable's
 // Windows launcher is repaired. `events` limits which template events are merged.
 function mergeHooks(file, step, { graphify, events } = {}) {
   let template = fs.readFileSync(path.join(templates, "codex", "hooks.json"), "utf8");
@@ -313,17 +313,22 @@ function mergeHooks(file, step, { graphify, events } = {}) {
   config.hooks = config.hooks || {};
   let repaired = 0;
   const impeccableWindows = 'cmd.exe /d /c "if exist .agents\\skills\\impeccable\\scripts\\impeccable.cmd .agents\\skills\\impeccable\\scripts\\impeccable.cmd hook"';
-  const verifyHook = wanted.hooks.Stop[0].hooks[0];
+  for (const [event, groups] of Object.entries(config.hooks)) {
+    config.hooks[event] = groups.map((group) => {
+      const hooks = (group.hooks || []).filter((hook) => {
+        const remove = [hook.command, hook.commandWindows].some((command) => typeof command === "string" && command.includes("claude-verify.js"));
+        if (remove) repaired++;
+        return !remove;
+      });
+      return hooks.length === (group.hooks || []).length ? group : { ...group, hooks };
+    }).filter((group) => (group.hooks || []).length);
+    if (!config.hooks[event].length && groups.length) delete config.hooks[event];
+  }
   for (const groups of Object.values(config.hooks)) {
     for (const group of groups) {
       for (const hook of group.hooks || []) {
         if (hook.type !== "command") continue;
         const commands = [hook.command, hook.commandWindows];
-        if (typeof hook.command === "string" && hook.command.includes("claude-verify.js") && hook.command !== verifyHook.command) {
-          Object.assign(hook, verifyHook);
-          repaired++;
-          continue;
-        }
         if (!commands.some((command) => typeof command === "string" && /\.agents\/skills\/impeccable\/scripts\/impeccable(?:\.cmd)?["']?\s+hook\b/.test(command.replace(/\\/g, "/")))) continue;
         if (hook.commandWindows === impeccableWindows) continue;
         hook.commandWindows = impeccableWindows;
@@ -342,7 +347,12 @@ function mergeHooks(file, step, { graphify, events } = {}) {
       added++;
     }
   }
-  if (!added && !repaired) return record(step, true, events ? "verify hook present" : "verify and graphify hooks present");
+  if (!added && !repaired) return record(step, true, "hooks up to date");
+  // A tracked hooks file is only pointed out, never edited, like old sections in CLAUDE.md.
+  const rel = projectDir ? path.relative(projectDir, file) : "..";
+  if (!shared && !rel.startsWith("..") && !path.isAbsolute(rel) && isTracked(projectDir, rel)) {
+    return record(`${step} (old workflow)`, null, "still has the previous version's Stop hook (claude-verify.js), which does nothing now; it's tracked, so remove it together with your team when convenient");
+  }
   write(file, JSON.stringify(config, null, 2) + "\n", step, `added ${added} hook group(s), updated ${repaired} hook(s); trust them again in Codex (/hooks)`);
 }
 
@@ -350,15 +360,13 @@ function codexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 }
 
-// The project's .codex/hooks.json when it's ours to change. When the team tracks it, only the
-// Stop hook goes into the user-level ~/.codex/hooks.json; its command does nothing in repos
-// without the workflow.
+// The project's .codex/hooks.json when it's ours to change; a tracked one only gets checked for
+// the old Stop hook. An existing user-level ~/.codex/hooks.json loses the old Stop hook, if any.
 function mergeProjectHooks(root, graphify, label = "") {
   const rel = ".codex/hooks.json";
-  if (!shared && isTracked(root, rel)) {
-    return mergeHooks(path.join(codexHome(), "hooks.json"), `~/.codex/hooks.json${label}`, { events: ["Stop"] });
-  }
-  mergeHooks(path.join(root, rel), `${rel}${label}`, { graphify });
+  const userFile = path.join(codexHome(), "hooks.json");
+  if (fs.existsSync(userFile)) mergeHooks(userFile, `~/.codex/hooks.json${label}`, { events: [] });
+  mergeHooks(path.join(root, rel), `${rel}${label}`, { graphify, events: !shared && isTracked(root, rel) ? [] : undefined });
 }
 
 // Claude Code: a PostToolUse hook on ExitPlanMode that reminds Claude to confirm the role and

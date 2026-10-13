@@ -1,5 +1,5 @@
 ---
-description: Install the tools (Claude Code, Codex CLI, Playwright, graphify) and set up the Claude + Codex workflow in this project, local only (no tracked file changes). Impeccable design skills are optional and asked about first.
+description: Install the tools (Claude Code, Codex CLI, Playwright, graphify) and set up the Claude + Codex workflow in this project, local workflow files, with legacy-hook cleanup on upgrade. Impeccable design skills are optional and asked about first.
 argument-hint: "[--yes] [--dry-run] [--tools-only|--project-only] [--impeccable|--skip-impeccable] [--graphify-scope=user|global] [--skip-playwright] [--playwright-codex] [--shared]"
 allowed-tools: Bash(node:*), Bash(git status:*), Read, Write, Edit, AskUserQuestion
 ---
@@ -33,7 +33,7 @@ Set up the Claude + Codex workflow in the current project.
    didn't pass `--yes`, list the install commands it printed and ask whether to re-run
    with `--yes`.
 3. Show the summary: what was created, merged or skipped, and the steps that need
-   attention. Run `git status` and confirm no workflow file shows up.
+   attention. Run `git status` and confirm workflow state is hidden; report any legacy-hook migration in a tracked hooks file.
    - Explain that everything is local: plans, verify logs, task summaries, `CLAUDE.local.md`
      and `.codex/workflow/CODEX.md` are hidden through `.git/info/exclude`.
    - Explain that a step reported as "tracked by git, left unchanged" is expected.
@@ -42,8 +42,8 @@ Set up the Claude + Codex workflow in the current project.
 4. Read the detected checks it printed. If they're wrong or empty, propose a
    `.codex/verify.json`. Also propose:
    - `alignment.riskPaths` for the project's schema, migration and auth paths;
-   - for apps with a UI, a `ui` block (`startCommand`, `url`, `viewports`, `paths`) so
-     Claude can audit UI phases with Playwright.
+   - for apps with a UI, a `ui` block (`startCommand`, `url`, `viewports`) so
+     Claude can run one final UI audit at close with Playwright.
 
    See the claude-codex-workflow skill, "Checks".
 5. List the "Left for you" steps, and the new- or existing-project steps from the skill's

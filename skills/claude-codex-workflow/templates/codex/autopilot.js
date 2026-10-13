@@ -11,14 +11,14 @@
 //
 //   node .codex/autopilot.js check   .codex/plans/<slug>.md      planning checklist (exit 1 if not runnable)
 //   node .codex/autopilot.js handoff .codex/plans/<slug>.md      send the plan to Codex [--phase N] [--continue]
-//                                                                 [--thread <id>] [--wait <s>] [--new-terminal] [--print]
+//                                                                 [--thread <id>] [--wait <s>] [--print]
 //   node .codex/autopilot.js wait    .codex/plans/<slug>.md      block until the run is done, stuck or failed
 //   node .codex/autopilot.js begin   .codex/plans/<slug>.md      start snapshot, status "running"
-//   node .codex/autopilot.js triage  .codex/plans/<slug>.md      Claude triages ## Codex Findings
+//   node .codex/autopilot.js review  .codex/plans/<slug>.md      read-only Codex plan review before handoff
 //   node .codex/autopilot.js phase   .codex/plans/<slug>.md <N>  snapshot the phase's starting tree
 //   node .codex/autopilot.js verify  .codex/plans/<slug>.md <N>  gate, then claude-verify.js --run
 //   node .codex/autopilot.js stop    .codex/plans/<slug>.md      Codex can't go on: --reason "<why>" (state stuck)
-//   node .codex/autopilot.js close   .codex/plans/<slug>.md      graphify update + Claude task summary
+//   node .codex/autopilot.js close   .codex/plans/<slug>.md      one final UI audit when needed, then graphify update
 //   node .codex/autopilot.js usage  [.codex/plans/<slug>.md]     headless Claude token usage so far
 //
 // Exit codes: 0 ok / PASS, 1 failed, 2 gate failed (fix and verify again),
@@ -29,9 +29,6 @@
 // or check that later fails only with errors from that baseline doesn't block the run.
 // `wait` watches the Codex session the plan went to: if Codex's turn ends (or the session
 // closes) while the run is still going, it marks the run stuck instead of waiting forever.
-//
-// `node .codex/autopilot.js run .codex/plans/<slug>.md [--resume] [--force]` is the
-// unattended fallback: the driver itself calls `codex exec` per phase, with the same steps.
 //
 // Nothing is committed, staged or pushed: every change is left in the working tree for
 // the user to review and commit. Phases are tracked with snapshots (workflow-lib.js).
@@ -59,19 +56,18 @@ for (let i = 0; i < args.length; i++) {
   else if (valueFlags.has(name) && args[i + 1] !== undefined) flagValues[name] = args[++i];
 }
 const flagValue = (name) => flagValues[name] || "";
-const commands = ["check", "handoff", "wait", "begin", "triage", "phase", "verify", "stop", "close", "run", "usage"];
-const command = commands.includes(positional[0]) ? positional.shift() : flags.has("--dry-run") ? "check" : "run";
+const commands = ["check", "review", "handoff", "wait", "begin", "phase", "verify", "stop", "close", "usage"];
+const command = commands.includes(positional[0]) ? positional.shift() : flags.has("--dry-run") ? "check" : "";
 const [planArg, phaseArg] = positional;
 const repoRoot = path.resolve(__dirname, "..");
 const isWindows = process.platform === "win32";
 const runDir = path.join(repoRoot, ".codex", "autopilot");
 const statusPath = path.join(runDir, "status.json");
 const handoffPath = path.join(runDir, "handoff.json");
-const lockPath = path.join(runDir, "running.lock");
 const verifyScript = path.join(repoRoot, ".codex", "hooks", "claude-verify.js");
 const verifyStatePath = path.join(repoRoot, ".codex", "verify", "state.json");
 const callTimeoutMs = 30 * 60 * 1000;
-const lockTimeoutMs = 6 * 60 * 60 * 1000;
+const activeTimeoutMs = 6 * 60 * 60 * 1000;
 const maxReworks = 2;
 const maxGateFailures = 3;
 const exitCodes = { failed: 1, gate: 2, rework: 3, stuck: 4, manual: 5, timeout: 6 };
@@ -157,25 +153,6 @@ function saveOutput(name, result) {
   return path.relative(repoRoot, file);
 }
 
-function codex(prompt, name) {
-  const lastMessage = path.join(runDir, `${slug}.${name}.md`);
-  log(`codex: ${name}`);
-  const result = runCodex(["exec", "-s", "workspace-write", "-C", repoRoot, "-o", lastMessage, "-"], { input: prompt });
-  const output = saveOutput(`codex.${name}`, result);
-  if (result.error) throw new Stop("failed", `codex ${name} didn't run: ${result.error.message}`);
-  if (result.status !== 0) throw new Stop("failed", `codex ${name} exited with ${result.status}; see ${output}`);
-  return readFile(lastMessage).trim();
-}
-
-function claude(prompt, name, { model, effort, tools }) {
-  log(`claude (${model}/${effort}): ${name}`);
-  const result = lib.runClaude(repoRoot, { name, task: slug, prompt, model, effort, allowed: tools, env: childEnv, timeout: callTimeoutMs });
-  const output = saveOutput(`claude.${name}`, { stdout: result.text, stderr: result.stderr });
-  if (result.error) throw new Stop("failed", `claude ${name} didn't run: ${result.error.message}`);
-  if (result.status !== 0) throw new Stop("failed", `claude ${name} exited with ${result.status}; see ${output}`);
-  return result.text;
-}
-
 function readPlan() {
   const text = readFile(path.join(repoRoot, planRel));
   return { text, meta: lib.frontmatter(text), phases: lib.parsePhases(text) };
@@ -186,100 +163,48 @@ function assertPlanValid(plan) {
   if (problems.length) throw new Stop("failed", `${planRel} isn't runnable:\n  - ${problems.join("\n  - ")}`);
 }
 
-const autopilotRules = `Autopilot run. Follow ${lib.codexRulesRel} "Phase execution", with these changes:
-- Never run git commit, git add, git stash or git push, and don't run \`graphify update\`. The user commits by hand; the driver runs the gate and the verification.
-- Work on this phase only. Do not start the next phase.
-- Run the phase gate yourself before you finish, and fix failures within the phase.`;
-
-function implementPrompt(phase, resuming) {
-  const resume = resuming
-    ? "\nAn earlier autopilot run was interrupted. Some of this phase's work may already be in the working tree; continue from it.\n"
-    : "";
-  return `Execute phase ${phase.id} of ${planRel}.
-${resume}
-${autopilotRules}
-
-End with: \`Phase ${phase.id} done. Gate: <command> -> <pass/fail>.\``;
-}
-
-function gateFixPrompt(phase, failure) {
-  return `The gate for phase ${phase.id} of ${planRel} failed:
-
-$ ${failure.gate}
-${failure.summary || failure.output}
-
-Fix the new failures within the phase's scope. Errors that were already in the repo before the task started don't block the gate; leave them alone.
-
-${autopilotRules}`;
-}
-
-function reworkPrompt(phase, attempt) {
-  return `Rework phase ${phase.id} of ${planRel}. The verification in .codex/verify/alignment.md returned NEEDS REWORK (rework attempt ${attempt} of ${maxReworks}).
-
-Read the report. Fix every MISSING and PARTIAL item, every check that still fails and every UI audit FAIL, and undo every change listed under OUT OF SCOPE, staying within the phase's scope. If a finding is about code this phase didn't touch, leave that code alone and say so in your reply.
-
-${autopilotRules}`;
-}
-
 // A gate passes when it exits 0, or when it fails only with errors that were already there
 // before the task started (the baseline `begin` recorded). Result: { ok, preexisting } or
 // { ok: false, gate, output, newLines, summary }.
-function runGates(phase) {
+async function runGates(phase) {
   const baseline = lib.readBaseline(repoRoot, slug);
   const preexisting = [];
-  for (const gate of phase.gates) {
-    log(`gate: ${gate}`);
-    const result = spawnSync(gate, {
-      cwd: repoRoot,
-      shell: true,
-      encoding: "utf8",
-      windowsHide: true,
-      maxBuffer: 256 * 1024 * 1024,
-      timeout: callTimeoutMs,
-      env: childEnv,
-    });
-    if (result.status === 0) continue;
-    const full = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
-    const failure = lib.classifyFailure(baseline, gate, full);
+  const commands = [...new Set([...phase.gates, ...lib.detectChecks(repoRoot)].map((cmd) => cmd.trim().replace(/^npm (?:run|run-script) test$/, "npm test")))];
+  for (const cmd of commands) log(`gate/check: ${cmd}`);
+  const results = await lib.runCommandsAsync(repoRoot, commands, { timeout: callTimeoutMs, env: childEnv });
+  const reportDir = lib.taskVerifyDir(repoRoot, slug);
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.writeFileSync(path.join(reportDir, `phase-${phase.id}.checks.log`), results.map((r) => `$ ${r.cmd} (${r.status})\n${r.output}`).join("\n\n"));
+  for (const result of results) {
+    if (result.ok) continue;
+    const failure = lib.classifyFailure(baseline, result.cmd, result.output);
     if (failure.preexisting) {
-      log(`gate: ${gate} fails only with errors that were there before the task started; not blocking`);
-      preexisting.push(gate);
+      log(`gate: ${result.cmd} fails only with errors that were there before the task started; not blocking`);
+      preexisting.push(result.cmd);
       continue;
     }
-    const output = tail(full, 3000);
-    log(`gate failed (exit ${result.status ?? "timeout"}): ${gate}`);
+    const output = tail(result.output, 3000);
     const newPart = failure.known && failure.newLines.length ? `New since the task started:\n${failure.newLines.slice(0, 60).join("\n")}\n\nFull output:\n` : "";
-    return { ok: false, gate, output, newLines: failure.newLines, summary: `${newPart}${output}` };
+    return { ok: false, gate: result.cmd, output, newLines: failure.newLines, summary: `${newPart}${output}` };
   }
   return { ok: true, preexisting };
 }
 
-function gateWithFix(phase, name) {
-  let result = runGates(phase);
-  if (result.ok) return result;
-  codex(gateFixPrompt(phase, result), `phase${phase.id}.${name}.gatefix`);
-  result = runGates(phase);
-  if (!result.ok) {
-    throw new Stop("failed", `phase ${phase.id}: gate \`${result.gate}\` still fails after one fix attempt:\n${result.summary}`);
-  }
-  return result;
-}
-
 function gateNoteFor(phase, preexisting = []) {
-  const note = `passed (run by autopilot): ${phase.gates.join(" && ")}`;
+  const note = `gates and project checks passed (run by autopilot): ${phase.gates.join(" && ")}`;
   return preexisting.length
     ? `${note}. Except: ${preexisting.map((gate) => `\`${gate}\``).join(", ")} still fail, but only with errors that were already in the repo before the task started (not caused by this phase; don't flag them)`
     : note;
 }
 
-// Steps A (checks), B (alignment) and C (UI audit) run in parallel inside claude-verify.js.
+// Green gates and checks are followed by one read-only alignment review.
 function verify(phase, phaseBase, preexisting = []) {
-  log(`verify: phase ${phase.id} (checks, alignment and UI audit in parallel)`);
+  log(`verify: phase ${phase.id} (alignment after green gates and checks)`);
   const gateNote = gateNoteFor(phase, preexisting);
   const result = run(process.execPath, [verifyScript, "--run", "--base", phaseBase, "--plan", planRel, "--phase", phase.id, "--gate", gateNote], {
     timeout: 2 * callTimeoutMs,
   });
-  if (result.error) throw new Stop("failed", `verification didn't run: ${result.error.message}`);
+  if (result.error || result.status !== 0) throw new Stop("failed", `verification didn't run: ${result.error?.message || `exit ${result.status}`}`);
   const state = readJson(verifyStatePath) || {};
   const verdict = state.lastVerdict || "none";
   if (verdict === "NOT RUN") throw new Stop("failed", "the Claude verification didn't start; see .codex/verify/last.log");
@@ -294,145 +219,127 @@ function needsPlanReview(plan) {
   return plan.meta.review === "codex" || plan.meta.risk === "high";
 }
 
-const origRel = () => `${lib.plansRel}/.${slug}.orig.md`;
+const reviewSchema = {
+  type: "object", properties: {
+    findings: { type: "array", items: { type: "object", properties: Object.fromEntries(["phase", "problem", "evidence", "proposedFix"].map((key) => [key, { type: "string" }])), required: ["phase", "problem", "evidence", "proposedFix"], additionalProperties: false } },
+    verdict: { type: "string", enum: ["APPROVE", "CHANGES NEEDED"] },
+  }, required: ["findings", "verdict"], additionalProperties: false,
+};
 
-function saveOriginal(plan) {
-  fs.writeFileSync(path.join(repoRoot, origRel()), plan.text);
-}
-
-// Unattended mode: Codex reviews the plan through `codex exec`, then Claude triages.
-function planReview() {
+function cmdReview() {
   const plan = readPlan();
-  if (!needsPlanReview(plan)) return;
-  if (plan.text.includes("## Codex Findings")) {
-    log("plan review: findings already present, skipping");
-    return;
+  assertPlanValid(plan);
+  const schemaFile = path.join(runDir, `${slug}.review-schema.json`);
+  const outFile = path.join(runDir, `${slug}.review-output.json`);
+  fs.writeFileSync(schemaFile, JSON.stringify(reviewSchema, null, 2));
+  fs.rmSync(outFile, { force: true });
+  const prompt = `Review this plan against the codebase. Do not edit the plan or any source file.
+Check files that do not exist, missed dependents (use graphify query when available), missing
+test gates, unclear acceptance criteria, Hands off interfaces the next phase cannot rely on,
+and risky ordering. For each finding, name its phase, problem, file or graph evidence and
+proposed fix. Propose an intermediate phase when a prerequisite is missing; do not renumber
+phases. Return the findings and APPROVE or CHANGES NEEDED using the supplied schema.
+Never commit, stage, stash or push.
+
+Plan: ${planRel}
+${plan.text}`;
+  log("codex: read-only plan review");
+  const result = runCodex(["exec", "--sandbox", "read-only", "--ephemeral", "--output-schema", schemaFile, "-o", outFile, "-"], { input: prompt });
+  const output = saveOutput("codex.review", result);
+  if (result.error || result.status !== 0) throw new Usage(`plan review failed: ${result.error?.message || `exit ${result.status}`}; see ${output}`);
+  const reviewed = readJson(outFile);
+  if (!["APPROVE", "CHANGES NEEDED"].includes(reviewed?.verdict) || !Array.isArray(reviewed.findings) || reviewed.findings.some((item) => !item || ["phase", "problem", "evidence", "proposedFix"].some((key) => typeof item[key] !== "string"))) {
+    throw new Usage(`plan review returned invalid findings; see ${path.relative(repoRoot, outFile)}`);
   }
-  setStatus({ step: "plan-review" });
-  saveOriginal(plan);
-  const reply = codex(
-    `Review ${planRel}\n\nFollow ${lib.codexRulesRel} "Plan review". Autopilot run: only append the \`## Codex Findings\` section to the plan. Don't edit anything else, and never commit.`,
-    "plan-review",
-  );
-  triageFindings(reply);
+  const reportDir = lib.taskVerifyDir(repoRoot, slug);
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.writeFileSync(path.join(reportDir, "plan-review.json"), JSON.stringify(reviewed, null, 2) + "\n");
+  for (const finding of reviewed.findings) console.log(`\nPhase ${finding.phase}: ${finding.problem}\nEvidence: ${finding.evidence}\nProposed fix: ${finding.proposedFix}`);
+  console.log(`\nPLAN REVIEW: ${reviewed.verdict}`);
 }
 
-// Checks that Codex only appended findings, then has a headless Claude run accept or
-// reject each one and fold the accepted ones into the plan.
-function triageFindings(reply = "") {
-  const reviewed = readFile(path.join(repoRoot, planRel));
-  const findingsAt = reviewed.indexOf("## Codex Findings");
-  if (findingsAt === -1) throw new Stop("failed", "plan review: the plan has no ## Codex Findings section");
-  const original = readFile(path.join(repoRoot, origRel()));
-  if (original && reviewed.slice(0, findingsAt).trimEnd() !== original.trimEnd()) {
-    throw new Stop("stuck", `plan review: the plan changed above its findings; compare ${planRel} with ${origRel()}`);
-  }
-  if (/PLAN REVIEW:\s*APPROVE/.test(reviewed.slice(findingsAt) + reply)) {
-    log("plan review: APPROVE");
-    return;
-  }
-  setStatus({ step: "plan-triage" });
-  claude(
-    `You are triaging Codex's review of ${planRel}. Under "## Codex Findings", mark each finding ACCEPTED or REJECTED with a one-line reason. Judge each against the real codebase; use \`graphify query\` when it helps.
+const uiTools = ["Read", "Grep", "Glob", ...["navigate", "navigate_back", "snapshot", "take_screenshot", "resize", "click", "type", "hover", "press_key", "select_option", "console_messages", "network_requests", "wait_for", "close"].map((tool) => `mcp__playwright__browser_${tool}`)];
+const uiDenied = ["Edit", "Write", "NotebookEdit", "Bash", "PowerShell", "mcp__playwright__browser_evaluate", "mcp__playwright__browser_run_code"];
+const uiSchema = {
+  type: "object", properties: {
+    checks: { type: "array", items: { type: "object", properties: { item: { type: "string" }, viewport: { type: "string" }, status: { type: "string", enum: ["PASS", "FAIL"] }, evidence: { type: "string" } }, required: ["item", "viewport", "status", "evidence"], additionalProperties: false } },
+    risks: { type: "array", items: { type: "string" } }, verdict: { type: "string", enum: ["PASS", "NEEDS REWORK", "BLOCKED"] },
+  }, required: ["checks", "risks", "verdict"], additionalProperties: false,
+};
 
-For each accepted finding, update the plan itself: edit the affected phase's Scope, Steps, Covers, Done when, Hands off or Gate, or add an intermediate phase such as "## Phase 2.5: <title>" in the same format as the others (every field, and a Gate with a runnable command). Don't renumber existing phases. Don't edit any file except ${planRel}.
+async function finalUiAudit(plan) {
+  const ui = lib.uiSettings(repoRoot, plan.text);
+  const reportDir = lib.taskVerifyDir(repoRoot, slug);
+  const outDir = path.join(reportDir, "final-ui");
+  fs.mkdirSync(outDir, { recursive: true });
+  const mcp = lib.playwrightMcpConfig(outDir);
+  if (!mcp) return { verdict: "BLOCKED", report: "Playwright MCP or Chromium is missing; run workflow setup." };
+  const mcpFile = path.join(reportDir, "final-ui.playwright.mcp.json");
+  fs.writeFileSync(mcpFile, JSON.stringify(mcp, null, 2));
+  const app = await lib.ensureApp(repoRoot, ui, path.join(reportDir, "final-ui.app.log"));
+  if (!app.ok) return { verdict: "BLOCKED", report: app.note };
+  try {
+    const config = lib.verifyConfig(repoRoot).ui || {};
+    const prompt = `You are auditing a Codex implementation in a real browser. Do NOT edit any file.
+Use Playwright tools. At each viewport resize, navigate, snapshot, interact as needed and
+save screenshots of the states judged. Check every plan item, layout breaks, overflow,
+clipped text, overlaps, console errors, failed requests, focus states and unlabeled controls.
+Read DESIGN.md when present. Report per-check PASS or FAIL with evidence in the structured
+output. Use BLOCKED when the page cannot load. Any failed check means NEEDS REWORK.
+End text with UI AUDIT: PASS | NEEDS REWORK | BLOCKED for older clients.
 
-End with one line: TRIAGE: <n> accepted, <n> rejected.`,
-    "plan-triage",
-    {
-      model: "sonnet",
-      effort: "medium",
-      tools: ["Read", "Grep", "Glob", `Edit(${planRel})`, "Bash(graphify query:*)", "Bash(graphify explain:*)", "Bash(graphify path:*)"],
-    },
-  );
-  assertPlanValid(readPlan());
-  log("plan review: triaged");
-}
-
-function runPhase(phase, resume) {
-  const verifyOnly = resume && ["verify", "rework"].includes(resume.step) && lib.treeExists(repoRoot, resume.phaseBase);
-  const phaseBase = verifyOnly ? resume.phaseBase : snapshot();
-  setStatus({ phase: phase.id, step: "implement", attempt: 0, phaseBase });
-  log(`--- phase ${phase.id}: ${phase.title} (starting snapshot ${phaseBase.slice(0, 7)})`);
-
-  let preexisting = [];
-  if (!verifyOnly) {
-    codex(implementPrompt(phase, Boolean(resume)), `phase${phase.id}`);
-    preexisting = gateWithFix(phase, "implement").preexisting;
-    if (lib.changedFiles(repoRoot, phaseBase, snapshot()).length === 0 && !resume) {
-      throw new Stop("failed", `phase ${phase.id}: Codex made no changes`);
-    }
-  }
-
-  for (let attempt = 1; ; attempt++) {
-    setStatus({ step: "verify", attempt: attempt - 1 });
-    if (verify(phase, phaseBase, preexisting)) return;
-    if (attempt > maxReworks) {
-      throw new Stop("stuck", `phase ${phase.id} still needs rework after ${maxReworks} attempts; see .codex/verify/alignment.md`);
-    }
-    setStatus({ step: "rework", attempt });
-    const before = snapshot();
-    codex(reworkPrompt(phase, attempt), `phase${phase.id}.rework${attempt}`);
-    preexisting = gateWithFix(phase, `rework${attempt}`).preexisting;
-    if (snapshot() === before) {
-      throw new Stop("stuck", `phase ${phase.id}: Codex made no changes for rework attempt ${attempt}; see .codex/verify/alignment.md`);
-    }
+Plan: ${planRel}
+App URL: ${ui.url}
+Viewports: ${ui.viewports.join(", ")}
+Screenshots: ${path.relative(repoRoot, outDir)}
+Checks:\n${ui.checks.map((item) => `- ${item}`).join("\n")}`;
+    const result = await lib.runClaudeAsync(repoRoot, { name: "ui-audit", task: slug, prompt,
+      model: config.model || "sonnet", effort: config.effort || "medium", allowed: uiTools,
+      denied: uiDenied, mcpConfig: mcpFile, jsonSchema: uiSchema, maxTurns: 80,
+      timeout: callTimeoutMs, env: childEnv });
+    const structured = result.structured;
+    const text = result.text || result.error?.message || result.stderr;
+    const verdicts = [...text.matchAll(/^[\s*_`>]*UI AUDIT:\s*(PASS|NEEDS REWORK|BLOCKED)/gim)];
+    let verdict = result.error || result.status !== 0 ? "BLOCKED" : ["PASS", "NEEDS REWORK", "BLOCKED"].includes(structured?.verdict) ? structured.verdict : verdicts.at(-1)?.[1].toUpperCase() || "NEEDS REWORK";
+    if (structured?.checks?.some((check) => check.status === "FAIL")) verdict = "NEEDS REWORK";
+    const report = structured ? [...(structured.checks || []).map((check) => `- ${check.status}: ${check.item} (${check.viewport}) ? ${check.evidence}`), ...(structured.risks || []).map((risk) => `- Risk: ${risk}`)].join("\n") : text;
+    return { verdict, report: `${app.note}\n\n${report}` };
+  } finally {
+    if (app.child) lib.killTree(app.child.pid);
   }
 }
 
-function localDate() {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-}
-
-function summaryRel() {
-  return `${lib.tasksRel}/${localDate()}-${slug}.md`;
-}
-
-// graphify update and the task summary don't depend on each other, so they run together.
 async function close() {
-  setStatus({ phase: "", step: "close", attempt: 0 });
-  log("--- close (graphify update and task summary in parallel)");
-  const summary = summaryRel();
-  fs.mkdirSync(path.join(repoRoot, lib.tasksRel), { recursive: true });
-  const graphify = new Promise((resolve) => {
-    const child = spawn("graphify", ["update", "."], { cwd: repoRoot, shell: isWindows, windowsHide: true, stdio: "ignore", env: childEnv });
-    child.on("error", () => resolve(false));
-    child.on("close", (code) => resolve(code === 0));
-  });
-  log("claude (sonnet/low): close");
-  const [graphOk, result] = await Promise.all([
-    graphify,
-    lib.runClaudeAsync(repoRoot, {
-      name: "close",
-      task: slug,
-      prompt: `close ${slug}
-
-Autopilot run. Follow "Closing a task" in CLAUDE.local.md. Read ${planRel}, the reports in .codex/verify/${slug}/ and the task's changes. Write the summary to ${summary}. Don't edit any other file, and never run git commit, git add or git push: the user commits by hand.`,
-      model: "sonnet",
-      effort: "low",
-      allowed: ["Read", "Grep", "Glob", `Write(${summary})`, `Edit(${summary})`, "Bash(git status:*)", "Bash(git diff:*)"],
-      env: childEnv,
-      timeout: callTimeoutMs,
-    }),
-  ]);
-  if (graphOk) log("graphify update . done");
-  const output = saveOutput("claude.close", { stdout: result.text, stderr: result.stderr });
-  if (result.error) throw new Stop("failed", `claude close didn't run: ${result.error.message}`);
-  if (result.status !== 0) throw new Stop("failed", `claude close exited with ${result.status}; see ${output}`);
-  if (!fs.existsSync(path.join(repoRoot, summary))) throw new Stop("failed", `close: ${summary} wasn't written`);
-  setStatus({ summary });
-  log(`summary written: ${summary}`);
-}
-
-function notify(message) {
-  process.stdout.write("\x07");
-  if (isWindows) {
-    const text = message.replace(/'/g, "''").slice(0, 200);
-    const script = `[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');$n=New-Object System.Windows.Forms.NotifyIcon;$n.Icon=[System.Drawing.SystemIcons]::Information;$n.Visible=$true;$n.ShowBalloonTip(10000,'Autopilot','${text}','Info');Start-Sleep -Seconds 6;$n.Dispose()`;
-    run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { timeout: 20000 });
+  setStatus({ phase: "", step: "close" });
+  const plan = readPlan();
+  if (plan.meta.ui === "yes") {
+    const baseline = lib.readBaseline(repoRoot, slug);
+    const results = await lib.runCommandsAsync(repoRoot, [...new Set(lib.detectChecks(repoRoot))], { timeout: callTimeoutMs, env: childEnv });
+    const reportDir = lib.taskVerifyDir(repoRoot, slug);
+    fs.mkdirSync(reportDir, { recursive: true });
+    fs.writeFileSync(path.join(reportDir, "final-checks.log"), results.map((r) => `$ ${r.cmd} (${r.status})\n${r.output}`).join("\n\n"));
+    const failed = results.find((r) => !r.ok && !lib.classifyFailure(baseline, r.cmd, r.output).preexisting);
+    if (failed) {
+      const failure = lib.classifyFailure(baseline, failed.cmd, failed.output);
+      setStatus({ step: "close-checks-failed" });
+      console.log(`CHECKS FAILED: ${failed.cmd}\nNew since the task started:\n${failure.newLines.join("\n")}\n${tail(failed.output, 3000)}`);
+      return exitCodes.gate;
+    }
+    const audit = await finalUiAudit(plan);
+    fs.writeFileSync(path.join(reportDir, "final-ui-audit.md"), `# Final UI audit: ${audit.verdict}\n\n${audit.report}\n`);
+    setStatus({ finalUiAudit: audit.verdict });
+    console.log(`UI AUDIT: ${audit.verdict}; see .codex/verify/${slug}/final-ui-audit.md`);
+    if (audit.verdict === "NEEDS REWORK") {
+      const closeReworks = (status.closeReworks || 0) + 1;
+      setStatus({ step: "close-rework", closeReworks });
+      if (closeReworks > maxReworks) throw new Stop("stuck", `final UI audit still needs rework after ${maxReworks} attempts`);
+      console.log("Fix the final UI report within the union of phase scopes, then run close again.");
+      return exitCodes.rework;
+    }
   }
+  const graph = await lib.runShellAsync(repoRoot, "graphify update .", { timeout: callTimeoutMs, env: childEnv });
+  log(graph.ok ? "graphify update . done" : `graphify update . failed; update the graph after fixing it: ${tail(graph.output, 1000)}`);
+  return 0;
 }
 
 function printChecklist(plan) {
@@ -443,19 +350,18 @@ function printChecklist(plan) {
     console.log(`\nPhase ${phase.id}: ${phase.title}\n  covers: ${(phase.covers || []).join(", ") || "(none)"}\n  gate: ${phase.gates.join(" && ") || "(none)"}${phase.uiAudit ? "\n  UI audit: yes" : ""}`);
   }
   const failed = items.filter((item) => !item.ok);
-  console.log(`\nPlan review: ${needsPlanReview(plan) ? "yes (Codex reviews, Claude triages)" : "no"}`);
+  console.log(`\nPlan review: ${needsPlanReview(plan) ? "run autopilot.js review" : "no"}`);
   console.log(failed.length ? `\nNot runnable: ${failed.length} item(s) to fix.` : "\nRunnable.");
   return failed.length;
 }
 
 function usage() {
   console.error(`usage:
-  node .codex/autopilot.js check|begin|triage|close .codex/plans/<slug>.md
-  node .codex/autopilot.js handoff .codex/plans/<slug>.md [--phase N | --continue] [--thread <id>] [--wait <seconds>] [--new-terminal] [--print]
+  node .codex/autopilot.js check|review|begin|close .codex/plans/<slug>.md
+  node .codex/autopilot.js handoff .codex/plans/<slug>.md [--phase N | --continue] [--thread <id>] [--wait <seconds>] [--print]
   node .codex/autopilot.js wait .codex/plans/<slug>.md [--since <iso>] [--timeout <seconds>]
   node .codex/autopilot.js phase|verify .codex/plans/<slug>.md <N>
   node .codex/autopilot.js stop .codex/plans/<slug>.md --reason "<why>"
-  node .codex/autopilot.js run .codex/plans/<slug>.md [--resume] [--force]
   node .codex/autopilot.js usage [.codex/plans/<slug>.md]   headless Claude token usage`);
   process.exit(exitCodes.failed);
 }
@@ -468,7 +374,7 @@ function findPhase(id) {
 
 // Codex-driven steps are separate processes that share .codex/autopilot/status.json.
 function requireActive() {
-  if (status.slug !== slug || !["running", "stuck", "failed"].includes(status.state)) {
+  if (status.slug !== slug || !["running", "paused", "stuck", "failed"].includes(status.state)) {
     throw new Usage(`no active run for ${planRel}; run \`node .codex/autopilot.js begin ${planRel}\` first`);
   }
   setStatus({ state: "running", reason: "" });
@@ -477,62 +383,19 @@ function requireActive() {
 // ---- handoff: send the plan to Codex ----
 
 // No quotes, semicolons or other shell metacharacters: the message goes through cmd.exe,
-// Windows Terminal, AppleScript and sh unchanged.
+// Windows and POSIX shells unchanged.
 function handoffMessage() {
   if (flags.has("--continue")) {
     return `Continue ${planRel}: read .codex/autopilot/status.json and re-run the step that stopped, then carry on. Follow ${lib.codexRulesRel}, section Full plan execution.`;
   }
   const phase = flagValue("--phase");
   return phase
-    ? `Execute phase ${phase} of ${planRel}. Follow ${lib.codexRulesRel}, section Phase execution, single-phase mode.`
+    ? `Execute phase ${phase} of ${planRel}. Follow ${lib.codexRulesRel}, section Single-phase handoff. Use phase and verify on the full-execution protocol.`
     : `Execute ${planRel}. Follow ${lib.codexRulesRel}, section Full plan execution.`;
 }
 
-function shQuote(text) {
-  return `'${text.replace(/'/g, "'\\''")}'`;
-}
-
-// Opens a new terminal window in the repo running `codex "<message>"`. True when one started.
-function openTerminal(message) {
-  const detached = (cmd, cmdArgs, options = {}) => {
-    try {
-      const child = spawn(cmd, cmdArgs, { cwd: repoRoot, detached: true, stdio: "ignore", windowsHide: false, ...options });
-      child.on("error", () => {});
-      child.unref();
-      return Boolean(child.pid);
-    } catch {
-      return false;
-    }
-  };
-  if (isWindows) {
-    const hasWt = spawnSync("where", ["wt.exe"], { windowsHide: true, stdio: "ignore" }).status === 0;
-    const line = hasWt
-      ? `wt.exe -d "${repoRoot}" cmd /k codex "${message}"`
-      : `start "Codex" /D "${repoRoot}" cmd /k codex "${message}"`;
-    return detached(line, [], { shell: true });
-  }
-  const inner = `cd ${shQuote(repoRoot)} && codex ${shQuote(message)}`;
-  if (process.platform === "darwin") {
-    const script = `tell application "Terminal" to do script "${inner.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-    const result = spawnSync("osascript", ["-e", script, "-e", 'tell application "Terminal" to activate'], { stdio: "ignore" });
-    return result.status === 0;
-  }
-  const shell = `${inner}; exec $SHELL`;
-  const candidates = [
-    process.env.TERMINAL ? [process.env.TERMINAL, ["-e", "sh", "-c", shell]] : null,
-    ["x-terminal-emulator", ["-e", "sh", "-c", shell]],
-    ["gnome-terminal", ["--", "sh", "-c", shell]],
-    ["konsole", ["-e", "sh", "-c", shell]],
-    ["xterm", ["-e", "sh", "-c", shell]],
-  ].filter(Boolean);
-  for (const [cmd, cmdArgs] of candidates) {
-    if (spawnSync("sh", ["-c", `command -v ${cmd}`], { stdio: "ignore" }).status === 0 && detached(cmd, cmdArgs)) return true;
-  }
-  return false;
-}
-
 function recordHandoff(via, thread, message, session = {}) {
-  const record = { slug, plan: planRel, via, thread: thread || "", source: session.source || "", cwd: session.cwd || "", message, at: new Date().toISOString() };
+  const record = { phase: flagValue("--phase"), slug, plan: planRel, via, thread: thread || "", source: session.source || "", cwd: session.cwd || "", message, at: new Date().toISOString() };
   fs.writeFileSync(handoffPath, JSON.stringify(record, null, 2) + "\n");
 }
 
@@ -577,17 +440,6 @@ async function cmdHandoff() {
     return exitCodes.manual;
   };
   if (flags.has("--print")) return paste();
-
-  // A new terminal window only on request: the user usually has Codex open in their IDE.
-  if (flags.has("--new-terminal")) {
-    if (openTerminal(message)) {
-      recordHandoff("new terminal", "", message);
-      console.log(`\nOpened a new terminal running Codex with:\n  ${message}`);
-      return 0;
-    }
-    console.log("\nCouldn't open a new terminal.");
-    return paste();
-  }
 
   const config = lib.verifyConfig(repoRoot).handoff || {};
   const pinned = flagValue("--thread") || config.thread || "";
@@ -635,10 +487,10 @@ function waitSummary(current, codexMessage = "") {
   }
   if (codexMessage) lines.push(`\nCodex's last message:\n${tail(codexMessage.trim(), 1500).replace(/^/gm, "  ")}`);
   const plan = readPlan();
-  if (current.state === "done" && plan.meta.ui === "yes") {
-    lines.push(`\nNext (Claude): final UI audit with Playwright MCP from the plan's ## UI audit section; write .codex/verify/${slug}/final-ui-audit.md`);
+  if (current.state === "paused") {
+    lines.push(`\nNext phase: node .codex/autopilot.js handoff ${planRel} --phase ${current.nextPhase}`);
   } else if (current.state === "done") {
-    lines.push("\nNext (Claude): review the reports and the diff, then report to the user.");
+    lines.push(`\nNext (Claude): read the reports${plan.meta.ui === "yes" ? ` and .codex/verify/${slug}/final-ui-audit.md` : ""}, spot-check the diff, then write the task summary and report to the user.`);
   } else {
     lines.push(`\nNext (Claude): explain why it stopped. After a fix, send it back with: node .codex/autopilot.js handoff ${planRel} --continue`);
   }
@@ -681,10 +533,10 @@ async function cmdWait() {
       const line = `${current.state} | phase ${current.phase || "-"} | ${current.step || "-"}`;
       if (line !== last) console.log(`[${new Date().toISOString()}] ${line}`);
       last = line;
-      if (["done", "stuck", "failed"].includes(current.state)) {
+      if (["done", "paused", "stuck", "failed"].includes(current.state)) {
         const message = current.state === "done" || !thread ? "" : ((await lib.codexThreadState(thread)).lastMessage || "");
         console.log(waitSummary(current, message));
-        return { done: 0, stuck: exitCodes.stuck, failed: exitCodes.failed }[current.state];
+        return { done: 0, paused: 0, stuck: exitCodes.stuck, failed: exitCodes.failed }[current.state];
       }
     }
 
@@ -762,9 +614,9 @@ async function recordBaseline(plan, tree) {
 }
 
 async function cmdBegin() {
-  const fresh = status.state === "running" && Date.now() - Date.parse(status.updated || 0) < lockTimeoutMs;
-  if (fresh && status.slug !== slug && !flags.has("--force")) {
-    throw new Usage(`another run (${status.plan}) is still marked running in ${path.relative(repoRoot, statusPath)}; pass --force if it's stale`);
+  const fresh = ["running", "paused"].includes(status.state) && Date.now() - Date.parse(status.updated || 0) < activeTimeoutMs;
+  if (fresh && status.slug !== slug) {
+    throw new Usage(`another run (${status.plan}) is still active in ${path.relative(repoRoot, statusPath)}; finish or stop it first`);
   }
   const plan = readPlan();
   assertPlanValid(plan);
@@ -777,26 +629,13 @@ async function cmdBegin() {
   }
   await recordBaseline(plan, start);
   setStatus({ step: "begun" });
-  const review = needsPlanReview(plan) && !plan.text.includes("## Codex Findings");
-  if (review) saveOriginal(plan);
   console.log(`\nPhases, in order: ${plan.phases.map((phase) => phase.id).join(", ")}`);
-  console.log(
-    review
-      ? `Plan review: yes. Append ## Codex Findings (${lib.codexRulesRel} "Plan review"), then run: node .codex/autopilot.js triage ${planRel}`
-      : `Plan review: no. Next: node .codex/autopilot.js phase ${planRel} ${plan.phases[0].id}`,
-  );
+  console.log(`Next: node .codex/autopilot.js phase ${planRel} ${plan.phases[0].id}`);
 }
 
-function cmdTriage() {
-  requireActive();
-  triageFindings();
-  assertPlanValid(readPlan());
-  setStatus({ step: "triaged" });
-  log("plan review: triaged");
-  console.log(`\nRe-read ${planRel}. Phases, in order: ${readPlan().phases.map((phase) => phase.id).join(", ")}`);
-}
 
-function cmdPhase() {
+async function cmdPhase() {
+  if (status.slug !== slug || !["running", "paused", "stuck", "failed"].includes(status.state)) await cmdBegin();
   requireActive();
   const phase = findPhase(phaseArg);
   const phaseBase = snapshot();
@@ -806,13 +645,13 @@ function cmdPhase() {
   console.log(`If you can't finish it within its scope, run: node .codex/autopilot.js stop ${planRel} --reason "<what blocks it>"`);
 }
 
-function cmdVerify() {
+async function cmdVerify() {
   requireActive();
   const phase = findPhase(phaseArg);
   if (status.phase !== phase.id || !lib.treeExists(repoRoot, status.phaseBase)) {
     throw new Usage(`phase ${phase.id} wasn't started; run \`node .codex/autopilot.js phase ${planRel} ${phase.id}\` first`);
   }
-  const gate = runGates(phase);
+  const gate = await runGates(phase);
   if (!gate.ok) {
     const failures = (status.gateFailures || 0) + 1;
     if (failures >= maxGateFailures) {
@@ -829,6 +668,12 @@ function cmdVerify() {
     setStatus({ step: "verified" });
     const phases = readPlan().phases;
     const next = phases[phases.findIndex((candidate) => candidate.id === phase.id) + 1];
+    const handoff = readJson(handoffPath) || {};
+    if (next && handoff.plan === planRel && handoff.phase === phase.id) {
+      setStatus({ state: "paused", nextPhase: next.id });
+      console.log(`\nVERDICT: PASS\nPAUSED\nNext: node .codex/autopilot.js handoff ${planRel} --phase ${next.id}`);
+      return 0;
+    }
     console.log(`\nVERDICT: PASS\nNext: node .codex/autopilot.js ${next ? `phase ${planRel} ${next.id}` : `close ${planRel}`}`);
     return 0;
   }
@@ -845,7 +690,7 @@ function cmdVerify() {
 
 // Codex runs this whenever it has to stop before `close`, so Claude's `wait` hears about it.
 function cmdStop() {
-  if (status.slug !== slug || !["running", "stuck", "failed"].includes(status.state)) {
+  if (status.slug !== slug || !["running", "paused", "stuck", "failed"].includes(status.state)) {
     throw new Usage(`no active run for ${planRel}`);
   }
   const reason = flagValue("--reason") || "Codex stopped (no reason given)";
@@ -854,57 +699,11 @@ function cmdStop() {
 
 async function cmdClose() {
   requireActive();
-  await close();
+  const result = await close();
+  if (result) return result;
   setStatus({ state: "done", step: "done", phase: "" });
   log(`=== done: ${planRel}. Nothing was committed; review the changes and commit them yourself.`);
-  notify(`${slug}: done. Claude is reviewing.`);
   console.log(`\nTask ${slug} done. Claude reviews it next; then review and commit the changes.`);
-}
-
-// Unattended fallback: the driver calls `codex exec` for every phase itself.
-async function cmdRun() {
-  const lockAge = fs.existsSync(lockPath) ? Date.now() - fs.statSync(lockPath).mtimeMs : Infinity;
-  if (lockAge < lockTimeoutMs && !flags.has("--force")) {
-    console.error(`another autopilot run holds ${path.relative(repoRoot, lockPath)}; pass --force if it's stale`);
-    return exitCodes.failed;
-  }
-  fs.writeFileSync(lockPath, `${process.pid} ${slug}`);
-
-  const previous = status;
-  const resuming = flags.has("--resume") && previous.slug === slug && ["stuck", "failed"].includes(previous.state);
-  status = resuming ? previous : {};
-  setStatus({ slug, plan: planRel, driver: "run", state: "running", reason: "", ...(resuming ? {} : { phase: "", step: "preflight", attempt: 0, phases: {} }) });
-  log(`=== autopilot ${resuming ? "resume" : "start"}: ${planRel}`);
-
-  try {
-    if (!resuming) {
-      const start = snapshot();
-      setStatus({ startTree: start });
-      if (lib.changedFiles(repoRoot, lib.headTree(repoRoot) || start, start).length) {
-        log("note: the working tree already had uncommitted changes; they're part of the starting snapshot and won't be reviewed");
-      }
-      await recordBaseline(readPlan(), start);
-    }
-    planReview();
-    const phases = readPlan().phases;
-    assertPlanValid(readPlan());
-    let startIndex = 0;
-    if (resuming && previous.step === "close") startIndex = phases.length;
-    else if (resuming && previous.phase) startIndex = Math.max(0, phases.findIndex((phase) => phase.id === previous.phase));
-    for (let i = startIndex; i < phases.length; i++) {
-      runPhase(phases[i], resuming && i === startIndex && previous.phase ? previous : null);
-    }
-    await close();
-    setStatus({ state: "done", step: "done", phase: "" });
-    log(`=== done: ${planRel}. Nothing was committed; review the changes and commit them yourself.`);
-    notify(`${slug}: done. Review and commit the changes.`);
-    return 0;
-  } catch (error) {
-    if (error instanceof Stop) log(`resume with: node .codex/autopilot.js run ${planRel} --resume`);
-    throw error;
-  } finally {
-    fs.rmSync(lockPath, { force: true });
-  }
 }
 
 async function main() {
@@ -913,6 +712,7 @@ async function main() {
     console.log(lib.usageSummary(repoRoot, slugArg));
     return;
   }
+  if (!command) usage();
   if (!planArg || (["phase", "verify"].includes(command) && !phaseArg)) usage();
   const planPath = path.resolve(planArg);
   planRel = path.relative(repoRoot, planPath).split(path.sep).join("/");
@@ -934,7 +734,7 @@ async function main() {
 
   logPath = path.join(runDir, `${slug}.log`);
   status = readJson(statusPath) || {};
-  const steps = { begin: cmdBegin, triage: cmdTriage, phase: cmdPhase, verify: cmdVerify, stop: cmdStop, close: cmdClose, run: cmdRun };
+  const steps = { begin: cmdBegin, review: cmdReview, phase: cmdPhase, verify: cmdVerify, stop: cmdStop, close: cmdClose };
   try {
     process.exitCode = (await steps[command]()) || 0;
   } catch (error) {
@@ -946,7 +746,6 @@ async function main() {
     const stop = error instanceof Stop ? error : new Stop("failed", error.stack || String(error));
     setStatus({ state: stop.state, reason: stop.message });
     log(`=== ${stop.state}: ${stop.message}`);
-    notify(`${slug}: ${stop.state}`);
     console.error(`\n${stop.state.toUpperCase()}: ${stop.message}`);
     process.exitCode = exitCodes[stop.state] || exitCodes.failed;
   }

@@ -21,6 +21,12 @@ function threads() {
   }
 }
 
+if (args[0] === "exec") {
+  fs.writeFileSync(config.argsFile, JSON.stringify(args));
+  fs.writeFileSync(args[args.indexOf("-o") + 1], JSON.stringify(config.review || { findings: [], verdict: "APPROVE" }));
+  process.exit(config.execCode || 0);
+}
+
 if (args[0] === "queue") {
   fs.writeFileSync(config.argsFile, args.join(" "));
   process.exit(config.queueCode || 0);

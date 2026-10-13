@@ -75,11 +75,7 @@ test("setup in a team repo changes no tracked file and leaves git status clean",
   assert.match(exclude, /^CLAUDE\.local\.md$/m);
   assert.doesNotMatch(exclude, /^\.codex\/hooks\.json$/m, "a tracked hooks.json isn't excluded");
 
-  // The tracked hooks.json stays untouched; the Stop hook goes to the user-level file.
-  const userHooks = JSON.parse(fs.readFileSync(path.join(dir, "..", `${path.basename(dir)}-codex-home`, "hooks.json"), "utf8"));
-  assert.strictEqual(userHooks.hooks.Stop.length, 1);
-  assert.match(userHooks.hooks.Stop[0].hooks[0].command, /claude-verify\.js/);
-  assert.ok(!userHooks.hooks.PreToolUse, "graphify guards stay project-level");
+  assert.ok(!fs.existsSync(path.join(dir, "..", `${path.basename(dir)}-codex-home`, "hooks.json")));
 
   const settings = JSON.parse(read(dir, ".claude/settings.local.json"));
   assert.strictEqual(settings.hooks.PostToolUse[0].matcher, "ExitPlanMode");
@@ -98,21 +94,45 @@ test("setup in a fresh repo creates and hides its own .codex/hooks.json", () => 
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
   assert.match(read(dir, ".git/info/exclude"), /^\.codex\/hooks\.json$/m);
   const hooks = JSON.parse(read(dir, ".codex/hooks.json"));
-  assert.ok(hooks.hooks.Stop && hooks.hooks.PreToolUse);
+  assert.ok(!hooks.hooks.Stop && hooks.hooks.PreToolUse);
   assert.strictEqual(git(dir, "status", "--porcelain", "--untracked-files=all"), "");
   assert.ok(!fs.existsSync(path.join(dir, ".gitignore")));
   assert.ok(!fs.existsSync(path.join(dir, "CLAUDE.md")));
 });
 
-test("an older workflow Stop hook is upgraded in place, not duplicated", () => {
+test("upgrade removes workflow hooks from project and user files, preserving other hooks", () => {
   const dir = gitRepo();
-  const old = "node -e \"const cp=require('node:child_process');const path=require('node:path');const root=cp.execFileSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8'}).trim();require(path.join(root,'.codex','hooks','claude-verify.js'))\"";
-  write(dir, ".codex/hooks.json", JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: old }] }] } }));
+  const other = { type: "command", command: "echo unrelated" };
+  const old = { type: "command", command: "node .codex/hooks/claude-verify.js" };
+  const config = { hooks: { Stop: [{ matcher: "*", hooks: [old, other] }, { hooks: [{ ...old, command: "old launcher", commandWindows: old.command }] }] } };
+  write(dir, ".codex/hooks.json", JSON.stringify(config));
+  const userFile = path.join(dir, "..", `${path.basename(dir)}-codex-home`, "hooks.json");
+  fs.mkdirSync(path.dirname(userFile), { recursive: true });
+  fs.writeFileSync(userFile, JSON.stringify(config));
   const result = install(dir);
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
-  const stop = JSON.parse(read(dir, ".codex/hooks.json")).hooks.Stop;
-  assert.strictEqual(stop.length, 1);
-  assert.match(stop[0].hooks[0].command, /existsSync/);
+  for (const file of [path.join(dir, ".codex/hooks.json"), userFile]) {
+    const hooks = JSON.parse(fs.readFileSync(file, "utf8")).hooks;
+    assert.deepStrictEqual(hooks.Stop, [{ matcher: "*", hooks: [other] }]);
+  }
+  assert.ok(JSON.parse(read(dir, ".codex/hooks.json")).hooks.PreToolUse, "an untracked project file gets the graphify hooks");
+  assert.ok(!JSON.parse(fs.readFileSync(userFile, "utf8")).hooks.PreToolUse, "the user file only loses the old hook");
+  const before = read(dir, ".codex/hooks.json");
+  assert.strictEqual(install(dir).status, 0);
+  assert.strictEqual(read(dir, ".codex/hooks.json"), before);
+});
+
+test("upgrade only points out the old Stop hook in a tracked .codex/hooks.json", () => {
+  const dir = gitRepo();
+  const legacy = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "node .codex/hooks/claude-verify.js" }] }] } });
+  write(dir, ".codex/hooks.json", legacy);
+  git(dir, "add", ".codex/hooks.json");
+  git(dir, "commit", "-qm", "legacy hooks");
+  const result = install(dir);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(read(dir, ".codex/hooks.json"), legacy, "a tracked file is never edited");
+  assert.match(result.stdout, /\.codex\/hooks\.json \(old workflow\): still has the previous version's Stop hook/);
+  assert.strictEqual(git(dir, "status", "--porcelain", "--untracked-files=all"), "");
 });
 
 test("untracked plans from the old plans/ folder move to .codex/plans/", () => {
@@ -172,7 +192,6 @@ ui: yes
 1. Render the badge.
 **Covers:** A1
 **Done when:** the badge shows the count.
-**UI audit:** the badge sits right of the name at both widths.
 **Gate (must pass):**
 - \`node --version\`
 `;
@@ -279,9 +298,9 @@ test("handoff --print exits 5 with the paste line", () => {
 
 // A codex stand-in (tests/fixtures/fake-codex.js) on PATH. Its app-server serves the threads
 // in threadsFile; `queue` records its arguments in argsFile.
-function fakeCodex({ threads, queueCode = 0, proxyCode = 0 } = {}) {
+function fakeCodex({ threads, queueCode = 0, proxyCode = 0, review, execCode = 0 } = {}) {
   const bin = tempDir("ccw-bin-");
-  const config = { threadsFile: path.join(bin, "threads.json"), argsFile: path.join(bin, "args.txt"), queueCode, proxyCode };
+  const config = { threadsFile: path.join(bin, "threads.json"), argsFile: path.join(bin, "args.txt"), queueCode, proxyCode, review, execCode };
   fs.writeFileSync(path.join(bin, "config.json"), JSON.stringify(config));
   if (threads) fs.writeFileSync(config.threadsFile, JSON.stringify(threads));
   const script = path.join(__dirname, "fixtures", "fake-codex.js");
@@ -367,18 +386,18 @@ test("wait returns when the run is done, with a summary, and 4 when it's stuck",
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /Run add-badge: DONE/);
   assert.match(result.stdout, /Phase 1 \(API\): PASS/);
-  assert.match(result.stdout, /final UI audit/);
+  assert.match(result.stdout, /final-ui-audit\.md/);
   status("stuck");
   result = autopilot(dir, ["wait", ".codex/plans/add-badge.md", "--since", since, "--timeout", "30"]);
   assert.strictEqual(result.status, 4, result.stdout + result.stderr);
   assert.match(result.stdout, /handoff \.codex\/plans\/add-badge\.md --continue/);
 });
 
-// ---- verification runs its steps in parallel ----
+// ---- explicit alignment verification ----
 
 // A headless-claude stand-in on PATH. It answers the alignment review with PASS and records
 // each call (name, start, end) in times.jsonl.
-function fakeClaude() {
+function fakeClaude({ verdict = "PASS", structured = true, status = 0 } = {}) {
   const bin = tempDir("ccw-claude-");
   const times = path.join(bin, "times.jsonl");
   const fake = path.join(bin, "fake-claude.js");
@@ -386,12 +405,14 @@ function fakeClaude() {
     fake,
     `const fs = require("fs");
 const prompt = process.argv[process.argv.indexOf("-p") + 1] || "";
-const name = /VERDICT: PASS/.test(prompt) ? "alignment" : /UI AUDIT/.test(prompt) ? "ui" : "fix";
+const name = /UI AUDIT/.test(prompt) ? "ui" : "alignment";
 const start = Date.now();
 setTimeout(() => {
-  fs.appendFileSync(${JSON.stringify(times)}, JSON.stringify({ name, start, end: Date.now() }) + "\\n");
-  process.stdout.write(JSON.stringify({ result: name === "alignment" ? "DONE: all\\nVERDICT: PASS" : "fixed nothing" }));
-}, 1500);
+  fs.appendFileSync(${JSON.stringify(times)}, JSON.stringify({ name, args: process.argv.slice(2), prompt, start, end: Date.now() }) + "\\n");
+  const output = { result: name === "ui" ? "UI AUDIT: PASS" : "DONE: fallback\\nVERDICT: PASS", structured_output: ${structured} ? name === "ui" ? { checks: [{ item: "badge visible", viewport: "375", status: ${JSON.stringify(verdict)} === "NEEDS REWORK" ? "FAIL" : "PASS", evidence: "snapshot" }], risks: [], verdict: ${JSON.stringify(verdict)} } : { done: [{ item: "all", evidence: "src/label.js:1" }], partial: [], missing: [], outOfScope: [], handsOff: [], risks: [], verdict: ${JSON.stringify(verdict)} } : undefined };
+  process.stdout.write(JSON.stringify(output));
+  process.exit(${status});
+}, 100);
 `,
   );
   // Shaped like npm's shim, which workflow-lib resolves to `node <script>` on Windows.
@@ -545,7 +566,7 @@ test("wait keeps waiting while Codex is working", () => {
   assert.match(result.stdout, /Codex is waiting for your approval in its panel/);
 });
 
-test("verify's checks step passes a check that only fails with pre-existing errors and doesn't send it to the fixer", () => {
+test("verify carries baseline check failures into one alignment review", () => {
   const dir = gateRepo("");
   write(dir, "check.js", `process.stdout.write(${JSON.stringify(oldError)}); process.exit(1);\n`);
   write(dir, ".codex/verify.json", JSON.stringify({ checks: ["node check.js"] }));
@@ -556,38 +577,202 @@ test("verify's checks step passes a check that only fails with pre-existing erro
   const result = step(dir, ["verify", "1"], claude.env);
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
   const state = JSON.parse(read(dir, ".codex/verify/state.json"));
-  assert.match(state.lastChecks, /^pass \(pre-existing failures: node check\.js\)/);
+  assert.deepStrictEqual(JSON.parse(read(dir, ".codex/autopilot/status.json")).phases["1"].preexisting, ["node check.js"]);
   assert.strictEqual(state.lastVerdict, "PASS");
-  assert.ok(!claude.calls().some((call) => call.name === "fix"), "the fixer must not run for pre-existing failures");
+  assert.strictEqual(claude.calls().length, 1);
 });
 
-test("verify runs the checks fix step and the alignment review at the same time, and keeps per-task reports", () => {
-  const dir = workflowRepo();
-  write(dir, ".codex/verify.json", JSON.stringify({ checks: ['node -e "process.exit(1)"'] }));
-  write(dir, "src/api/badge.js", "module.exports = 1;\n");
+test("a new project check failure exits 2 without any Claude call, then stops on the third failure", () => {
+  const dir = gateRepo("");
+  write(dir, "check.js", 'const fs = require("fs"); const text = fs.readFileSync("check-errors.txt", "utf8"); process.stdout.write(text); process.exit(text ? 1 : 0);');
+  write(dir, "check-errors.txt", "");
+  write(dir, ".codex/verify.json", JSON.stringify({ checks: ["node check.js"] }));
+  assert.strictEqual(step(dir, ["begin"]).status, 0);
+  assert.strictEqual(step(dir, ["phase", "1"]).status, 0);
+  write(dir, "check-errors.txt", "new check failure");
   const claude = fakeClaude();
-  const base = lib.headTree(dir) || "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-  const result = spawnSync(process.execPath, [path.join(dir, ".codex/hooks/claude-verify.js"), "--run", "--base", base, "--plan", ".codex/plans/add-badge.md", "--phase", "1", "--gate", "passed"], {
-    cwd: dir,
-    encoding: "utf8",
-    env: { ...process.env, ...claude.env },
-  });
+  const result = step(dir, ["verify", "1"], claude.env);
+  assert.strictEqual(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stdout, /New since the task started:\nnew check failure/);
+  assert.strictEqual(step(dir, ["verify", "1"], claude.env).status, 2);
+  assert.strictEqual(step(dir, ["verify", "1"], claude.env).status, 4);
+  assert.strictEqual(claude.calls().length, 0);
+});
+
+test("green verification deduplicates checks and makes one structured alignment call", () => {
+  const dir = gateRepo("");
+  write(dir, "gate.js", 'const fs = require("fs"); fs.appendFileSync("gate-count.txt", "x");');
+  write(dir, ".codex/verify.json", JSON.stringify({ checks: ["node gate.js", "node gate.js"] }));
+  assert.strictEqual(step(dir, ["begin"]).status, 0);
+  write(dir, "gate-count.txt", "");
+  assert.strictEqual(step(dir, ["phase", "1"]).status, 0);
+  write(dir, "src/label.js", "module.exports = 'right';\n");
+  const claude = fakeClaude();
+  const result = step(dir, ["verify", "1"], claude.env);
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
-
+  assert.strictEqual(read(dir, "gate-count.txt"), "x");
   const calls = claude.calls();
-  const fix = calls.find((call) => call.name === "fix");
-  const alignment = calls.find((call) => call.name === "alignment");
-  assert.ok(fix && alignment, JSON.stringify(calls));
-  assert.ok(fix.start < alignment.end && alignment.start < fix.end, `steps didn't overlap: ${JSON.stringify(calls)}`);
-
-  const state = JSON.parse(read(dir, ".codex/verify/state.json"));
-  assert.strictEqual(state.lastAlignment, "PASS");
-  assert.strictEqual(state.lastChecks, "fail");
-  assert.strictEqual(state.lastVerdict, "NEEDS REWORK", "failing checks fail the phase even when alignment passes");
+  assert.strictEqual(calls.length, 1);
+  assert.ok(calls[0].args.includes("--json-schema"));
+  assert.strictEqual(calls[0].args[calls[0].args.indexOf("--max-turns") + 1], "40");
+  assert.match(calls[0].prompt, /Phase diff:[\s\S]*module.exports/);
+  assert.match(read(dir, ".codex/verify/alignment.md"), /all: src\/label.js:1/);
   for (const file of ["phase-1.alignment.md", "phase-1.checks.log", "phase-1.diff"]) {
-    assert.ok(fs.existsSync(path.join(dir, ".codex/verify/add-badge", file)), file);
+    assert.ok(fs.existsSync(path.join(dir, ".codex/verify/fix-label", file)), file);
   }
-  assert.match(read(dir, ".codex/verify/alignment.md"), /Checks that still fail/);
-  // Only the app change shows up; every workflow file is hidden through .git/info/exclude.
-  assert.strictEqual(git(dir, "status", "--porcelain", "--untracked-files=all"), "?? src/api/badge.js");
+});
+
+test("structured alignment verdict takes precedence over text and falls back for old clients", () => {
+  const dir = gateRepo("");
+  assert.strictEqual(step(dir, ["phase", "1"]).status, 0);
+  const result = step(dir, ["verify", "1"], fakeClaude({ verdict: "NEEDS REWORK" }).env);
+  assert.strictEqual(result.status, 3, result.stdout + result.stderr);
+  assert.strictEqual(JSON.parse(read(dir, ".codex/verify/state.json")).lastVerdict, "NEEDS REWORK");
+  assert.strictEqual(step(dir, ["verify", "1"], fakeClaude({ structured: false }).env).status, 0);
+});
+
+test("removed run command returns usage", () => {
+  const dir = workflowRepo();
+  const result = autopilot(dir, ["run", ".codex/plans/add-badge.md"]);
+  assert.strictEqual(result.status, 1);
+  assert.match(result.stderr, /usage:/);
+});
+
+test("single-phase handoff begins automatically, pauses on PASS and wait names next phase", () => {
+  const dir = workflowRepo();
+  write(dir, ".codex/verify.json", JSON.stringify({ checks: [], baseline: false }));
+  const handed = autopilot(dir, ["handoff", ".codex/plans/add-badge.md", "--phase", "1", "--print"]);
+  assert.strictEqual(handed.status, 5);
+  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/handoff.json")).phase, "1");
+  const since = new Date(Date.now() - 1000).toISOString();
+  assert.strictEqual(autopilot(dir, ["phase", ".codex/plans/add-badge.md", "1"]).status, 0);
+  const claude = fakeClaude();
+  const result = autopilot(dir, ["verify", ".codex/plans/add-badge.md", "1"], claude.env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PAUSED/);
+  const waited = autopilot(dir, ["wait", ".codex/plans/add-badge.md", "--since", since, "--timeout", "2"]);
+  assert.strictEqual(waited.status, 0, waited.stdout + waited.stderr);
+  assert.match(waited.stdout, /handoff .* --phase 2/);
+  assert.strictEqual(autopilot(dir, ["phase", ".codex/plans/add-badge.md", "2"]).status, 0);
+});
+
+
+test("review is read-only and ephemeral, prints and saves structured findings without editing the plan", () => {
+  const dir = workflowRepo();
+  const original = read(dir, ".codex/plans/add-badge.md");
+  const codex = fakeCodex({ review: { findings: [{ phase: "2", problem: "missing UI spec", evidence: "src/ui/Badge.jsx", proposedFix: "add a spec gate" }], verdict: "CHANGES NEEDED" } });
+  const result = autopilot(dir, ["review", ".codex/plans/add-badge.md"], codex.env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /Phase 2: missing UI spec/);
+  assert.match(result.stdout, /Evidence: src\/ui\/Badge.jsx/);
+  assert.match(result.stdout, /Proposed fix: add a spec gate/);
+  assert.match(result.stdout, /PLAN REVIEW: CHANGES NEEDED/);
+  const args = JSON.parse(fs.readFileSync(codex.argsFile, "utf8"));
+  assert.strictEqual(args[args.indexOf("--sandbox") + 1], "read-only");
+  assert.ok(args.includes("--ephemeral") && args.includes("--output-schema"));
+  assert.strictEqual(read(dir, ".codex/plans/add-badge.md"), original);
+  assert.strictEqual(JSON.parse(read(dir, ".codex/verify/add-badge/plan-review.json")).verdict, "CHANGES NEEDED");
+  assert.ok(!fs.existsSync(path.join(dir, ".codex/plans/.add-badge.orig.md")));
+});
+
+// Isolate graphify and the globally installed Playwright package for close-time tests.
+function fakeCloseTools(claude) {
+  const bin = claude.bin;
+  const globalRoot = path.join(bin, "global");
+  write(globalRoot, "@playwright/mcp/package.json", JSON.stringify({ version: "test", bin: { "playwright-mcp": "cli.js" } }));
+  write(globalRoot, "@playwright/mcp/cli.js", "");
+  const browser = path.join(bin, "chromium");
+  fs.writeFileSync(browser, "");
+  write(globalRoot, "@playwright/mcp/node_modules/playwright/package.json", JSON.stringify({ main: "index.js" }));
+  write(globalRoot, "@playwright/mcp/node_modules/playwright/index.js", `module.exports = { chromium: { executablePath: () => ${JSON.stringify(browser)} } };`);
+  const graphCalls = path.join(bin, "graph-calls.txt");
+  for (const [name, code] of [["npm", `console.log(${JSON.stringify(globalRoot)});`], ["graphify", `require("fs").appendFileSync(${JSON.stringify(graphCalls)}, process.argv.slice(2).join(" ") + "\\n");`]]) {
+    const file = path.join(bin, `${name}.js`);
+    fs.writeFileSync(file, code);
+    if (isWindows) fs.writeFileSync(path.join(bin, `${name}.cmd`), `@"${process.execPath}" "${file}" %*\r\n`);
+    else {
+      fs.writeFileSync(path.join(bin, name), `#!/bin/sh\nexec "${process.execPath}" "${file}" "$@"\n`);
+      fs.chmodSync(path.join(bin, name), 0o755);
+    }
+  }
+  return { graphCalls, env: claude.env };
+}
+
+async function closeUiRepo() {
+  const dir = gateRepo("");
+  const server = require("node:net").createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  await new Promise((resolve) => server.close(resolve));
+  const text = gatePlan.replace("ui: no", "ui: yes") + `\n## UI audit\n- Start: \`node ui-app.js\`\n- URL: http://127.0.0.1:${port}\n- Checks:\n  - badge visible\n`;
+  write(dir, ".codex/plans/fix-label.md", text);
+  write(dir, "ui-app.js", `console.log("ui app started"); require("http").createServer((req, res) => res.end("badge")).listen(${port}, "127.0.0.1");`);
+  assert.strictEqual(step(dir, ["begin"]).status, 0);
+  assert.strictEqual(step(dir, ["phase", "1"]).status, 0);
+  return dir;
+}
+
+test("non-UI begin to close makes one alignment call and no summary call", () => {
+  const dir = gateRepo("");
+  const claude = fakeClaude();
+  const runtime = fakeCloseTools(claude);
+  assert.strictEqual(step(dir, ["begin"], runtime.env).status, 0);
+  assert.strictEqual(step(dir, ["phase", "1"], runtime.env).status, 0);
+  assert.strictEqual(step(dir, ["verify", "1"], runtime.env).status, 0);
+  const result = step(dir, ["close"], runtime.env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.deepStrictEqual(claude.calls().map((call) => call.name), ["alignment"]);
+  assert.strictEqual(fs.readFileSync(runtime.graphCalls, "utf8"), "update .\n");
+  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/status.json")).state, "done");
+  assert.ok(!fs.existsSync(path.join(dir, ".codex/tasks")));
+});
+
+test("UI close makes one structured report-only audit, logs app startup and becomes done", async () => {
+  const dir = await closeUiRepo();
+  const claude = fakeClaude();
+  const runtime = fakeCloseTools(claude);
+  const result = step(dir, ["close"], runtime.env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(claude.calls().length, 1);
+  const call = claude.calls()[0];
+  assert.strictEqual(call.name, "ui");
+  assert.strictEqual(call.args[call.args.indexOf("--max-turns") + 1], "80");
+  assert.ok(call.args.includes("--json-schema") && call.args.includes("--mcp-config"));
+  assert.ok(call.args.includes("mcp__playwright__browser_navigate"));
+  assert.ok(call.args.includes("--disallowedTools"));
+  assert.match(read(dir, ".codex/verify/fix-label/final-ui-audit.md"), /PASS: badge visible/);
+  assert.match(read(dir, ".codex/verify/fix-label/final-ui.app.log"), /ui app started/);
+  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/status.json")).state, "done");
+});
+
+test("UI close reworks twice and then stops, without graphify or a summary call", async () => {
+  const dir = await closeUiRepo();
+  const claude = fakeClaude({ verdict: "NEEDS REWORK" });
+  const runtime = fakeCloseTools(claude);
+  for (const code of [3, 3, 4]) {
+    const result = step(dir, ["close"], runtime.env);
+    assert.strictEqual(result.status, code, result.stdout + result.stderr);
+  }
+  assert.strictEqual(claude.calls().length, 3);
+  assert.ok(!fs.existsSync(runtime.graphCalls));
+  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/status.json")).state, "stuck");
+});
+
+test("UI close blocks new check failures before calling Claude and accepts baseline failures", async () => {
+  const dir = await closeUiRepo();
+  write(dir, "check.js", 'const fs = require("fs"); const text = fs.readFileSync("check-errors.txt", "utf8"); process.stdout.write(text); process.exit(1);');
+  write(dir, "check-errors.txt", oldError);
+  write(dir, ".codex/verify.json", JSON.stringify({ checks: ["node check.js"] }));
+  assert.strictEqual(step(dir, ["begin"]).status, 0);
+  const claude = fakeClaude({ verdict: "BLOCKED" });
+  const runtime = fakeCloseTools(claude);
+  write(dir, "check-errors.txt", oldError + "\nnew failure");
+  assert.strictEqual(step(dir, ["close"], runtime.env).status, 2);
+  assert.strictEqual(claude.calls().length, 0);
+  write(dir, "check-errors.txt", oldError);
+  const result = step(dir, ["close"], runtime.env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /UI AUDIT: BLOCKED/);
+  assert.strictEqual(claude.calls().length, 1);
+  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/status.json")).state, "done");
 });

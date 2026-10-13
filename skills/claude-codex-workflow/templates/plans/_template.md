@@ -16,12 +16,13 @@ One or two sentences. What changes for the user.
 - Do not touch: ...
 
 ## Acceptance
+For UI items, prefer a Playwright spec gate (aria snapshots or axe) when the app has @playwright/test.
 Every item has an id, and every id is covered by at least one phase (`**Covers:**`).
 - A1: <observable result, with the test command or endpoint check that proves it>
 - A2: <...>
 
 ## UI audit
-Only when `ui: yes`. Claude audits these with Playwright after each UI phase and once at the end.
+Only when `ui: yes`. One headless Claude audit checks these with Playwright at close.
 - Start: `<app start command, e.g. npm run dev>`
 - URL: <http://localhost:3000/page>
 - Viewports: 375, 1280
@@ -35,7 +36,6 @@ Only when `ui: yes`. Claude audits these with Playwright after each UI phase and
 **Covers:** A1
 **Done when:** <what is true when this phase is finished>
 **Hands off:** <what phase 2 relies on: files, exports, API shapes, data>
-**UI audit:** <only for UI phases: what the browser must show after this phase>
 **Gate (must pass):**
 - `<runnable command, e.g. npx tsc --noEmit>`
 **Suggested commit (optional, for you):** `<type>(<slug>): <summary>`

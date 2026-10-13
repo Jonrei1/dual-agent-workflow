@@ -27,11 +27,8 @@ if (!approved) {
   process.exit(0);
 }
 
-const context = `Claude + Codex workflow, plan approved. Before any app code changes:
-1. If you haven't asked for THIS plan, ask now with AskUserQuestion who implements it: "Codex implements (Claude orchestrates)", "Claude implements", or "Codex, manual phases". Never reuse an earlier plan's answer.
-2. Claude implements: edit the code yourself and run the project's checks.
-3. Codex (either option): save the plan as .codex/plans/<slug>.md in the template's format (frontmatter task/risk/review/ui, Acceptance ids, per phase Scope/Steps/Covers/Done when/Hands off/Gate, UI audit when ui: yes). Run \`node .codex/autopilot.js check .codex/plans/<slug>.md\` and fix the plan until every item passes.
-4. Then run \`node .codex/autopilot.js handoff .codex/plans/<slug>.md\` (add \`--phase 1\` for manual phases). Exit 5 means show the user the printed paste line.
-5. Then start \`node .codex/autopilot.js wait .codex/plans/<slug>.md\` with run_in_background, tell the user you're watching, and review the result automatically when it finishes (see CLAUDE.local.md "Review when Codex finishes").`;
+const context = `Plan approved. Follow CLAUDE.local.md, section Workflow.
+Ask who implements THIS plan if not already answered; for Codex, save and check the plan, run review when required, handoff (manual: --phase N), then wait in the background.
+When wait returns, review the reports and diff, write the task summary and report to the user; use the rules there for stopped runs.`;
 
 process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: context } }) + "\n");

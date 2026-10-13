@@ -204,7 +204,6 @@ function uiSettings(repoRoot, text) {
     url: (!isPlaceholder(spec.url) && spec.url) || config.url || "",
     viewports: (spec.viewports && spec.viewports.length ? spec.viewports : config.viewports) || [375, 1280],
     readyTimeoutSec: config.readyTimeoutSec || 90,
-    paths: Array.isArray(config.paths) ? config.paths : [],
     checks: spec.checks || [],
   };
 }
@@ -304,7 +303,6 @@ function planChecklist(repoRoot, slug, text) {
     add(Boolean(ui.url), "UI audit URL (plan `- URL:` or verify.json ui.url)");
     add(Boolean(ui.startCommand), "UI audit start command (plan `- Start:` or verify.json ui.startCommand)");
     add(Boolean(spec && spec.checks.length), "UI audit has `- Checks:` items");
-    add(phases.some((phase) => phase.uiAudit && !isPlaceholder(phase.uiAudit)), "at least one phase has a **UI audit:** block");
   }
   return items;
 }
@@ -383,7 +381,7 @@ function resolveClaude() {
   return claudeCommand;
 }
 
-function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], permissionMode, mcpConfig }) {
+function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], permissionMode, mcpConfig, jsonSchema, maxTurns }) {
   const claude = resolveClaude();
   const args = [
     ...claude.prefix,
@@ -395,6 +393,8 @@ function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], per
     "--strict-mcp-config",
     "--tools", builtinTools(allowed).join(","),
   ];
+  if (jsonSchema) args.push("--json-schema", JSON.stringify(jsonSchema));
+  if (maxTurns) args.push("--max-turns", String(maxTurns));
   if (mcpConfig) args.push("--mcp-config", mcpConfig);
   if (permissionMode) args.push("--permission-mode", permissionMode);
   const { settingSources } = headlessConfig(repoRoot);
@@ -421,7 +421,7 @@ function finishClaude(repoRoot, options, result) {
   } catch {
     // Usage logging must never fail a run.
   }
-  return { status: result.status, error: result.error, text, stderr: (result.stderr || "").trim() };
+  return { status: result.status, error: result.error, structured: parsed?.structured_output, text, stderr: (result.stderr || "").trim() };
 }
 
 // Runs `claude -p` and returns { status, error, text, stderr }. `text` is the model's final
@@ -938,7 +938,38 @@ function playwrightMcpConfig(outputDir) {
   };
 }
 
+async function responds(url) {
+  try {
+    await fetch(url, { signal: AbortSignal.timeout(3000), redirect: "manual" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Reuses an app already answering on the URL; otherwise starts it and waits until it answers.
+async function ensureApp(repoRoot, ui, logFile) {
+  if (await responds(ui.url)) return { ok: true, note: `app already running at ${ui.url}` };
+  if (!ui.startCommand) return { ok: false, note: `nothing answers at ${ui.url} and no start command is set (plan "- Start:" or verify.json ui.startCommand)` };
+  const out = fs.openSync(logFile, "w");
+  const child = spawn(ui.startCommand, { cwd: repoRoot, shell: true, windowsHide: true, detached: !isWindows, stdio: ["ignore", out, out] });
+  fs.closeSync(out);
+  const deadline = Date.now() + ui.readyTimeoutSec * 1000;
+  let exited = false;
+  child.on("error", () => (exited = true));
+  child.on("exit", () => (exited = true));
+  while (Date.now() < deadline && !exited) {
+    if (await responds(ui.url)) return { ok: true, child, note: `started \`${ui.startCommand}\`` };
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  killTree(child.pid);
+  return { ok: false, note: `\`${ui.startCommand}\` ${exited ? "exited" : `didn't answer at ${ui.url} within ${ui.readyTimeoutSec}s`}; see ${path.relative(repoRoot, logFile)}` };
+}
+
+
 module.exports = {
+  ensureApp,
+  responds,
   plansRel,
   tasksRel,
   verifyRel,
