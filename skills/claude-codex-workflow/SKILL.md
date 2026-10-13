@@ -64,6 +64,13 @@ Impeccable installs only when opted in. See README for machine prerequisites and
 | --skip-playwright | Skip browser package, download and registrations |
 | --playwright-codex | Also register browser tools for Codex |
 | --root <dir> | Configure the Git repo containing that directory |
+| --sync | Quiet, files-only upgrade of a set-up project; run by the plugin's SessionStart hook |
+
+Re-running upgrades the .codex/ scripts, .codex/workflow/CODEX.md and the CLAUDE.local.md
+section, deletes files an earlier version installed that this one dropped (recorded in
+.codex/workflow-manifest.json), and refreshes the plan template and caveman skills while
+unedited. After a plugin update, the SessionStart hook runs install.js --sync in projects that
+have a manifest, so no re-run is needed.
 
 ### Project files
 
@@ -137,6 +144,11 @@ Single-phase handoffs pause after intermediate PASS and wait prints the next han
 ## Troubleshooting
 
 - Missing tools: check PATH/authentication, then re-run setup with authorized installation flags.
+- Old workflow still runs: start a new session after a plugin update (SessionStart runs --sync)
+  or run setup --project-only once if there is no workflow-manifest.json; restart both CLIs.
+- Codex hook fails on every event on Windows: Impeccable's `if exist (...)` command breaks under
+  PowerShell. Setup and --sync rewrite it to `cmd.exe /d /c`, even in a tracked
+  .codex/hooks.json (commit that change); trust the hooks again with /hooks.
 - Paste fallback: keep Codex open in the repo or pin --thread; queue/app-server is experimental.
 - Failed/stuck: read status/logs and alignment.md, fix the blocker, then handoff --continue.
 - UI BLOCKED: inspect final-ui.app.log, app URL/start command, Playwright and Chromium setup.

@@ -93,7 +93,9 @@ The machine tools are shared across projects. Run full setup once on each develo
 | Project integrations | Only if you opt in, runs `npx -y impeccable install --project --providers=claude,codex` (Impeccable writes shared files of its own). graphify's own project installers edit `CLAUDE.md`/`AGENTS.md`, so they run only with `--shared` | With Impeccable, design skills and hooks |
 | Local-only ignores and checks | Hides every workflow path through `.git/info/exclude` (never `.gitignore`), and prints detected verification commands | `.git/info/exclude` and installer output |
 
-Fresh local setup keeps `git status` clean. Tracked files are otherwise left alone; the upgrade cleanup of legacy hooks is an explicit exception. Re-running updates workflow-owned `.codex/` scripts and the `## Workflow` section in `CLAUDE.local.md`; existing customized plan and caveman templates are kept. If an older version of the workflow left sections in tracked `CLAUDE.md`, `AGENTS.md` or `.gitignore`, setup points them out; remove them with your team in a normal commit. Existing Playwright registrations are preserved and matching Chromium is reused. Keeping an existing registration does not prove it connects successfully; check `/mcp`.
+Fresh local setup keeps `git status` clean. Tracked files are otherwise left alone; the upgrade cleanup of legacy hooks and the repair of Impeccable's broken Windows hook command are explicit exceptions. Re-running updates workflow-owned `.codex/` scripts and the `## Workflow` section in `CLAUDE.local.md`, and removes scripts an earlier version installed that the current one no longer ships (tracked in `.codex/workflow-manifest.json`, which is hidden like the other workflow files). Plan and caveman templates are refreshed only while you haven't edited them. If an older version of the workflow left sections in tracked `CLAUDE.md`, `AGENTS.md` or `.gitignore`, setup points them out; remove them with your team in a normal commit. Existing Playwright registrations are preserved and matching Chromium is reused. Keeping an existing registration does not prove it connects successfully; check `/mcp`.
+
+**Updating the plugin:** after `/plugin update claude-codex-workflow`, the plugin's SessionStart hook runs `install.js --sync` in any project set up with a version that writes the manifest. It upgrades the scripts, rules and hooks silently, removes stale files, and says so in the session. It does nothing in other projects, never downgrades a project a teammate already upgraded, and needs no re-run of setup. A project set up by an older version (no manifest) gets a one-line hint to run `/claude-codex-workflow:setup --project-only` once. Restart Claude Code and Codex after an update so they reload the rules and scripts.
 
 ### Flags
 
@@ -111,6 +113,7 @@ Fresh local setup keeps `git status` clean. Tracked files are otherwise left alo
 | `--impeccable` | Install Impeccable. Without it, a terminal installer asks; `--yes`, `--dry-run` and a non-interactive run skip it. |
 | `--skip-impeccable` | Don't install Impeccable and don't ask. |
 | `--impeccable-providers=codex` | Implies `--impeccable`; installs design skills only for Codex when Claude already uses the Impeccable plugin. |
+| `--sync` | Quiet, files-only upgrade of a project that already uses the workflow. Run by the plugin's SessionStart hook; no tools, prompts, graphify or Impeccable. |
 | `--update-sections` | With `--shared`: replace existing workflow sections in `CLAUDE.md` and `AGENTS.md` with bundled versions. Without it, `CLAUDE.local.md` is always kept current. |
 | `--root <dir>` | Configure the Git repository containing that directory. |
 
@@ -284,6 +287,7 @@ and ast-grep overlap with graphify, so they are not added here.
 The [skill](skills/claude-codex-workflow/SKILL.md) covers setup flags, check detection and
 file destinations. Templates live in `skills/claude-codex-workflow/templates/`; Node helpers
 and installers are under that skill's `scripts/` and `templates/codex/` directories.
-`commands/setup.md` is the Claude plugin entry point, and `.claude-plugin/` holds metadata.
-Run `npm test` for installer, protocol, verification, browser-setup and usage regressions
+`commands/setup.md` is the Claude plugin entry point, `hooks/hooks.json` is the SessionStart
+hook that syncs projects after a plugin update, and `.claude-plugin/` holds metadata.
+Run `npm test` for installer, sync, protocol, verification, browser-setup and usage regressions
 using fake CLIs, without model calls, browser downloads or changes to user configuration.

@@ -39,6 +39,8 @@ Set up the Claude + Codex workflow in the current project.
    - Explain that a step reported as "tracked by git, left unchanged" is expected.
    - If it points out old workflow sections in tracked `CLAUDE.md`, `AGENTS.md` or
      `.gitignore`, suggest removing them in a normal team commit.
+   - Mention any stale files it removed. Later plugin updates sync the project
+     automatically through the plugin's SessionStart hook.
 4. Read the detected checks it printed. If they're wrong or empty, propose a
    `.codex/verify.json`. Also propose:
    - `alignment.riskPaths` for the project's schema, migration and auth paths;
