@@ -14,7 +14,6 @@ test("runClaudeAsync resolves with the error when spawn throws synchronously", a
   const result = await lib.runClaudeAsync(repo, { name: "alignment", task: "t", prompt: "a\0b", model: "sonnet", effort: "low", allowed: ["Read"], timeout: 1000 });
   assert.ok(result.error, "the spawn error is returned");
   assert.strictEqual(result.status, null);
-  assert.match(fs.readFileSync(path.join(repo, ".codex", "verify", "usage.jsonl"), "utf8"), /"name":"alignment".*"ok":false/);
 });
 
 test("runShellAsync resolves { ok: false } when spawn throws synchronously", async () => {

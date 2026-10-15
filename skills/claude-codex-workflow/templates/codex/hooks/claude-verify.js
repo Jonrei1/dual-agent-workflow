@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 "use strict";
 
-// Explicit verification runner: --run requires --plan and --phase.
+// Explicit verification runner: --run requires --plan and --phase. All its state and reports
+// live in .codex/verify/<task>/, so tasks (and developers' worktrees) never overwrite each other.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -13,7 +14,8 @@ function flagValue(name) {
 }
 
 const repoRoot = flagValue("--root") ? path.resolve(flagValue("--root")) : path.resolve(__dirname, "..", "..");
-const stateDir = path.join(repoRoot, ".codex", "verify");
+const task = flagValue("--plan") ? path.basename(flagValue("--plan"), ".md") : "";
+const stateDir = lib.taskVerifyDir(repoRoot, task);
 const statePath = path.join(stateDir, "state.json");
 const logPath = path.join(stateDir, "last.log");
 const alignmentPath = path.join(stateDir, "alignment.md");
@@ -140,7 +142,7 @@ function context() {
 const alignmentTools = ["Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git show:*)"];
 const alignmentDenied = ["Edit", "Write", "NotebookEdit", "PowerShell"];
 const itemSchema = { anyOf: [{ type: "string" }, { type: "object", properties: { item: { type: "string" }, evidence: { type: "string" } }, required: ["item", "evidence"], additionalProperties: false }] };
-const sections = { done: "DONE", partial: "PARTIAL", missing: "MISSING", outOfScope: "OUT OF SCOPE", handsOff: "HANDS OFF", risks: "RISKS" };
+const sections = { done: "DONE", partial: "PARTIAL", missing: "MISSING", outOfScope: "OUT OF SCOPE", handsOff: "HANDS OFF", must: "MUST FIX", unneeded: "COULD BE CUT", risks: "RISKS" };
 const alignmentSchema = {
   type: "object",
   properties: { ...Object.fromEntries(Object.keys(sections).map((key) => [key, { type: "array", items: itemSchema }])), verdict: { type: "string", enum: ["PASS", "NEEDS REWORK"] } },
@@ -148,11 +150,19 @@ const alignmentSchema = {
 };
 
 function alignmentPrompt(ctx, gateNote, diff) {
-  const change = Buffer.byteLength(diff, "utf8") <= 60 * 1024 ? `Phase diff:\n${diff}` : "Read the complete phase diff in .codex/verify/phase.diff.";
+  const change = Buffer.byteLength(diff, "utf8") <= 60 * 1024 ? `Phase diff:\n${diff}` : `Read the complete phase diff in ${path.relative(repoRoot, diffPath).split(path.sep).join("/")}.`;
   return `You are reviewing a Codex implementation against its plan. Do NOT edit any file.
 Judge the diff and source files, not Codex's summary. For this phase, report DONE, PARTIAL,
-MISSING, OUT OF SCOPE, HANDS OFF and RISKS with file:line evidence. Check Done when,
-Covers and the interfaces the next phase relies on. Return the structured fields requested.
+MISSING, OUT OF SCOPE, HANDS OFF, MUST FIX, COULD BE CUT and RISKS with file:line evidence.
+Check Done when, Covers and the interfaces the next phase relies on. Review like a senior
+developer and QA engineer who prefers the smallest change that solves the task:
+- MUST FIX: a concrete failing case (input, state, wrong result) in code this phase touched:
+  broken logic, unsafe input handling, lost data, an untested risky path. Only real defects.
+- OUT OF SCOPE also covers a new dependency, config option or abstraction the phase's Steps
+  didn't call for, and ANY change to frontend files (pages, components, views, styles,
+  templates): those belong to Claude, never to a Codex phase.
+- COULD BE CUT: code that duplicates something existing or serves no listed step. Report only.
+- Style, naming and taste are not findings. Return the structured fields requested.
 The gates and project checks already ran; do not run checks or browser audits.
 Nothing is committed. The diff includes new files and excludes local workflow state.
 End text with VERDICT: PASS | NEEDS REWORK for clients that need a text verdict.
@@ -170,9 +180,7 @@ function renderAlignment(structured) {
 async function runVerification() {
   fs.mkdirSync(stateDir, { recursive: true });
   const ctx = context();
-  const task = path.basename(ctx.plan.rel, ".md");
-  const taskDir = lib.taskVerifyDir(repoRoot, task);
-  fs.mkdirSync(taskDir, { recursive: true });
+  const taskDir = stateDir;
   const tag = `phase-${ctx.plan.phase}`;
   const diff = lib.diffText(repoRoot, ctx.base.tree, ctx.current) || "(no changes outside workflow paths)\n";
   fs.writeFileSync(diffPath, diff);
@@ -190,10 +198,10 @@ async function runVerification() {
   const verdicts = [...text.matchAll(/^[\s*_`>]*VERDICT:\s*(PASS|NEEDS REWORK)/gim)];
   const alignment = ["PASS", "NEEDS REWORK"].includes(structured?.verdict) ? structured.verdict : verdicts.at(-1)?.[1].toUpperCase() || "NEEDS REWORK";
   const unchanged = lib.snapshot(repoRoot) === ctx.current;
-  const verdict = !started ? "NOT RUN" : alignment === "PASS" && unchanged ? "PASS" : "NEEDS REWORK";
-  const liveBlock = diff.split("\n").some((line) => line.startsWith("+") && /impeccable-live-start|localhost[^\s"']*\/live\.js/.test(line));
+  const mustFix = (structured?.must || []).length > 0;
+  const verdict = !started ? "NOT RUN" : alignment === "PASS" && unchanged && !mustFix ? "PASS" : "NEEDS REWORK";
   const report = structured?.verdict ? renderAlignment(structured) : text;
-  const header = `# Verification\n\n- Plan: ${planLabel(ctx)}\n- Verdict: ${verdict}\n- Checks: ${flagValue("--gate") || "not supplied"}\n\n${liveBlock ? "MUST REMOVE BEFORE COMMIT: the change adds an Impeccable live-mode block.\n\n" : ""}${unchanged ? "" : "Working tree changed during review; verify again.\n\n"}${report}\n`;
+  const header = `# Verification\n\n- Plan: ${planLabel(ctx)}\n- Verdict: ${verdict}\n- Checks: ${flagValue("--gate") || "not supplied"}\n\n${unchanged ? "" : "Working tree changed during review; verify again.\n\n"}${report}\n`;
   fs.writeFileSync(alignmentPath, header);
   fs.copyFileSync(alignmentPath, path.join(taskDir, `${tag}.alignment.md`));
   writeState({ verifiedTree: verdict === "PASS" ? ctx.current : ctx.base.tree, verifiedHead: ctx.head,

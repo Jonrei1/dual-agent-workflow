@@ -2,7 +2,7 @@
 task: <slug>
 risk: normal            # normal | high (schema, auth, payments, cross-layer contracts)
 review: none            # none | codex
-ui: no                  # yes | no (yes adds the functional Playwright audit and Claude's UI polish pass)
+ui: no                  # yes | no (yes: Claude builds the frontend after the backend phases, then audits it with Playwright)
 ---
 
 # <Task title>
@@ -16,21 +16,28 @@ One or two sentences. What changes for the user.
 - Do not touch: ...
 
 ## Acceptance
-For UI items, prefer a Playwright spec gate (aria snapshots or axe) when the app has @playwright/test.
-Frontend phases deliver working UI on existing components; Claude polishes the visuals after close.
-Every item has an id, and every id is covered by at least one phase (`**Covers:**`).
+Every item has an id, and every id is covered by a phase's `**Covers:**` (backend) or by the
+`## Frontend (Claude)` section's (UI). Phases are backend only: Codex never builds frontend files.
 - A1: <observable result, with the test command or endpoint check that proves it>
 - A2: <...>
 
 ## UI audit
-Only when `ui: yes`. One headless Claude audit checks these functionally with Playwright at
-close; Claude then polishes the visuals.
+Only when `ui: yes`. After Codex finishes, Claude builds the frontend and then audits it itself
+with Playwright against these checks, at each viewport.
 - Start: `<app start command, e.g. npm run dev>`
 - URL: <http://localhost:3000/page>
 - Viewports: 375, 1280
-- Polish focus (optional): <what Claude should refine, e.g. hierarchy of the pricing card>
+- Browser: <headless | headed>   (ask the user: headed opens a visible window to watch the audit)
 - Checks:
   - <what the user must see or be able to do, per state>
+
+## Frontend (Claude)
+Only when `ui: yes`. What Claude builds after the backend phases pass: pages, components, states
+(loading, empty, error), copy and accessibility, using the last phase's Hands off as the API.
+- Builds: <pages and components, e.g. the profile page and its Badge component>
+**Covers:** A1
+
+Keep it small: the fewest backend phases that keep each diff reviewable (one is fine).
 
 ## Phase 1: <title>
 **Scope:** <files and interfaces this phase may change>

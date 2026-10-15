@@ -31,7 +31,7 @@ const codexRulesRel = ".codex/workflow/CODEX.md";
 const planPattern = /^\.codex\/plans\/[^/]+\.md$/;
 
 // Changes under these paths are workflow state, not part of any phase.
-const workflowPaths = [":!plans", ":!.codex", ":!.claude", ":!.agents/skills/caveman", ":!.impeccable", ":!graphify-out", ":!CLAUDE.local.md"];
+const workflowPaths = [":!.codex", ":!.claude", ":!graphify-out", ":!CLAUDE.local.md"];
 // Changes under these never trigger a verification run on their own.
 const triggerIgnored = [...workflowPaths, ":!*.md"];
 
@@ -83,7 +83,8 @@ function diffText(repoRoot, from, to, pathspec = workflowPaths) {
   return gitOut(repoRoot, ["diff", from, to, "--", ".", ...pathspec]);
 }
 
-// Per-task verify logs: .codex/verify/<slug>/. Reports without a task go to _untasked/.
+// Per-task verify logs and state: .codex/verify/<slug>/. Nothing is shared between tasks, so
+// reports from different tasks (or worktrees) never overwrite each other.
 function taskVerifyDir(repoRoot, slug) {
   return path.join(repoRoot, ".codex", "verify", slug || "_untasked");
 }
@@ -98,6 +99,16 @@ function readJsonFile(file) {
 
 function verifyConfig(repoRoot) {
   return readJsonFile(path.join(repoRoot, ".codex", "verify.json")) || {};
+}
+
+// sha256 of a file's contents, or "" when it doesn't exist. A run records these for the plan
+// and verify.json when it begins, so neither can be loosened mid-run to make a gate pass.
+function fileHash(file) {
+  try {
+    return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  } catch {
+    return "";
+  }
 }
 
 // ---- Plans -------------------------------------------------------------------------------
@@ -186,10 +197,14 @@ function uiAuditSpec(text) {
     ? body.slice(checksAt.index + checksAt[0].length).split(/\r?\n/).map((line) => /^\s+[-*]\s*(.+)$/.exec(line)).filter(Boolean).map((m) => m[1].trim())
     : [];
   const viewports = value("Viewports").split(/[,\s]+/).map(Number).filter((n) => n > 0);
-  return { body, start: value("Start"), url: value("URL"), viewports, checks };
+  return { body, start: value("Start"), url: value("URL"), browser: value("Browser").toLowerCase().split(/\s/)[0], viewports, checks };
 }
 
 // Effective UI settings: the plan's ## UI audit section wins over .codex/verify.json "ui".
+// Claude builds the frontend and runs the audit itself (the headless alternative is gone), so
+// these are the spec it follows. headed: the user watches the browser. Claude asks for every
+// ui: yes plan and records the answer as `- Browser: headless | headed`; verify.json
+// ui.headed is the fallback.
 function uiSettings(repoRoot, text) {
   const config = verifyConfig(repoRoot).ui || {};
   const spec = (text && uiAuditSpec(text)) || {};
@@ -197,9 +212,21 @@ function uiSettings(repoRoot, text) {
     startCommand: (!isPlaceholder(spec.start) && spec.start) || config.startCommand || "",
     url: (!isPlaceholder(spec.url) && spec.url) || config.url || "",
     viewports: (spec.viewports && spec.viewports.length ? spec.viewports : config.viewports) || [375, 1280],
-    readyTimeoutSec: config.readyTimeoutSec || 90,
+    browser: ["headless", "headed"].includes(spec.browser) ? spec.browser : typeof config.headed === "boolean" ? (config.headed ? "headed" : "headless") : "",
+    headed: spec.browser === "headed" || (!["headless", "headed"].includes(spec.browser) && config.headed === true),
     checks: spec.checks || [],
   };
+}
+
+// Frontend work is Claude's, never a Codex phase: pages, components, styles, templates and the
+// copy and accessibility in them. The plan lists it under `## Frontend (Claude)`.
+const frontendPattern = /\.(?:tsx|jsx|vue|svelte|astro|css|scss|sass|less|html|hbs|ejs|pug)\b|(?:^|[\s`,(/])(?:components?|pages?|views?|screens?|styles?|frontend|ui)\//i;
+
+function frontendSpec(text) {
+  const body = section(text, "Frontend \\(Claude\\)");
+  if (body === null) return null;
+  const covers = labelBlock(body, "Covers");
+  return { body, covers: covers === null ? [] : [...covers.matchAll(/\bA\d+\b/g)].map((m) => m[0]) };
 }
 
 const shellBuiltins = new Set(["cd", "echo", "test", "[", "true", "false", "exit", "set", "export", "env", "call", "if", "for"]);
@@ -264,7 +291,8 @@ function planChecklist(repoRoot, slug, text) {
 
   const ids = acceptanceIds(text);
   add(ids.length > 0, "acceptance items have ids (`- A1: ...`)");
-  const covered = new Set(phases.flatMap((phase) => phase.covers || []));
+  const frontend = meta.ui === "yes" ? frontendSpec(text) : null;
+  const covered = new Set([...phases.flatMap((phase) => phase.covers || []), ...(frontend ? frontend.covers : [])]);
   const uncovered = ids.filter((id) => !covered.has(id));
   add(uncovered.length === 0, "every acceptance item is covered by a phase", uncovered.join(", "));
   const unknown = [...covered].filter((id) => !ids.includes(id));
@@ -274,6 +302,7 @@ function planChecklist(repoRoot, slug, text) {
     const label = `Phase ${phase.id}`;
     const filled = (value) => value !== null && !isPlaceholder(value) && value.replace(/[.\s]/g, "") !== "";
     add(!isPlaceholder(phase.title), `${label}: title`);
+    add(!frontendPattern.test(phase.scope || ""), `${label}: **Scope:** is backend only (frontend files are Claude's: list them under ## Frontend (Claude), not in a phase)`, (frontendPattern.exec(phase.scope || "") || [""])[0].trim());
     add(filled(phase.scope), `${label}: **Scope:**`);
     add(filled(phase.steps), `${label}: **Steps:**`);
     add(phase.covers !== null && phase.covers.length > 0, `${label}: **Covers:** acceptance ids`);
@@ -297,6 +326,12 @@ function planChecklist(repoRoot, slug, text) {
     add(Boolean(ui.url), "UI audit URL (plan `- URL:` or verify.json ui.url)");
     add(Boolean(ui.startCommand), "UI audit start command (plan `- Start:` or verify.json ui.startCommand)");
     add(Boolean(spec && spec.checks.length), "UI audit has `- Checks:` items");
+    const front = frontendSpec(text);
+    add(front !== null && front.body.replace(/\*\*Covers:\*\*[^\n]*/, "").replace(/<[^>]*>/g, "").trim() !== "", "ui: yes has a `## Frontend (Claude)` section listing the pages and components Claude builds");
+    add(Boolean(front && front.covers.length), "`## Frontend (Claude)` has `**Covers:**` acceptance ids");
+    const last = phases[phases.length - 1];
+    if (last) add(last.handsOff !== null && !isPlaceholder(last.handsOff) && last.handsOff.replace(/[.\s]/g, "") !== "", `Phase ${last.id}: **Hands off:** (the API contract Claude builds the frontend against)`);
+    add(Boolean(ui.browser), "UI audit browser is headless or headed (plan `- Browser:` or verify.json ui.headed); ask the user");
   }
   return items;
 }
@@ -310,11 +345,10 @@ function planProblems(repoRoot, slug, text) {
 
 // ---- Headless Claude calls -------------------------------------------------------------
 //
-// Every headless call goes through runClaudeAsync, so all of them get the same
-// trimmed setup and the same usage record. Listing only the built-in tools a call needs
-// (--tools) cuts its fixed input from about 37k to 14k tokens, and --strict-mcp-config keeps
-// MCP tool schemas out unless the call passes its own --mcp-config (the UI audit's
-// Playwright server). Each call is appended to .codex/verify/usage.jsonl.
+// Every headless call goes through runClaudeAsync, so all of them get the same trimmed
+// setup. Listing only the built-in tools a call needs (--tools) cuts its fixed input from
+// about 37k to 14k tokens, and --strict-mcp-config keeps MCP tool schemas out unless the
+// call passes its own --mcp-config (the UI audit's Playwright server).
 //
 // Optional .codex/verify.json block:
 //   "headless": { "settingSources": "project,local" }
@@ -325,33 +359,10 @@ function headlessConfig(repoRoot) {
   return verifyConfig(repoRoot).headless || {};
 }
 
-function usagePath(repoRoot) {
-  return path.join(repoRoot, ".codex", "verify", "usage.jsonl");
-}
-
 // `allowed` holds permission patterns such as `Bash(npm test:*)`; the built-in tool a call
 // needs is the name before the parenthesis. MCP tools come from --mcp-config instead.
 function builtinTools(allowed) {
   return [...new Set(allowed.filter((pattern) => !pattern.startsWith("mcp__")).map((pattern) => pattern.replace(/\(.*$/, "")))];
-}
-
-function usageRecord(name, task, model, effort, parsed, ok) {
-  const usage = (parsed && parsed.usage) || {};
-  return {
-    time: new Date().toISOString(),
-    task: task || "",
-    name,
-    model,
-    effort,
-    ok,
-    inputTokens: usage.input_tokens || 0,
-    cacheCreationTokens: usage.cache_creation_input_tokens || 0,
-    cacheReadTokens: usage.cache_read_input_tokens || 0,
-    outputTokens: usage.output_tokens || 0,
-    turns: (parsed && parsed.num_turns) || 0,
-    costUsd: (parsed && parsed.total_cost_usd) || 0,
-    durationMs: (parsed && parsed.duration_ms) || 0,
-  };
 }
 
 // On Windows an npm install puts only claude.cmd on PATH, and spawn can't start a .cmd
@@ -398,7 +409,7 @@ function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], mcp
   return { command: claude.command, args };
 }
 
-function finishClaude(repoRoot, options, result) {
+function finishClaude(result) {
   const stdout = (result.stdout || "").trim();
   let parsed = null;
   try {
@@ -407,13 +418,6 @@ function finishClaude(repoRoot, options, result) {
     parsed = null;
   }
   const text = parsed && typeof parsed.result === "string" ? parsed.result.trim() : stdout;
-  const ok = !result.error && result.status === 0 && !(parsed && parsed.is_error);
-  try {
-    fs.mkdirSync(path.dirname(usagePath(repoRoot)), { recursive: true });
-    fs.appendFileSync(usagePath(repoRoot), `${JSON.stringify(usageRecord(options.name, options.task, options.model, options.effort, parsed, ok))}\n`);
-  } catch {
-    // Usage logging must never fail a run.
-  }
   return { status: result.status, error: result.error, structured: parsed?.structured_output, text, stderr: (result.stderr || "").trim() };
 }
 
@@ -433,7 +437,7 @@ function runClaudeAsync(repoRoot, options) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(finishClaude(repoRoot, options, { stdout, stderr, ...result }));
+      resolve(finishClaude({ stdout, stderr, ...result }));
     };
     let child;
     try {
@@ -490,39 +494,6 @@ function killTree(pid) {
   } catch {
     try { process.kill(pid); } catch { /* already gone */ }
   }
-}
-
-// Sums .codex/verify/usage.jsonl, optionally for one task, grouped by step name.
-function usageSummary(repoRoot, task) {
-  let lines = [];
-  try {
-    lines = fs.readFileSync(usagePath(repoRoot), "utf8").split("\n").filter(Boolean);
-  } catch {
-    return "No usage recorded yet (.codex/verify/usage.jsonl).";
-  }
-  const rows = lines.map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
-  const picked = task ? rows.filter((row) => row.task === task) : rows;
-  if (picked.length === 0) return task ? `No usage recorded for ${task}.` : "No usage recorded yet.";
-  const groups = new Map();
-  for (const row of picked) {
-    const key = `${row.name.replace(/\d+/g, "N")} (${row.model}/${row.effort})`;
-    const sum = groups.get(key) || { calls: 0, input: 0, output: 0, cost: 0, failed: 0 };
-    sum.calls += 1;
-    sum.input += row.inputTokens + row.cacheCreationTokens + row.cacheReadTokens;
-    sum.output += row.outputTokens;
-    sum.cost += row.costUsd;
-    sum.failed += row.ok ? 0 : 1;
-    groups.set(key, sum);
-  }
-  const out = [task ? `Headless Claude usage for ${task}` : "Headless Claude usage, all tasks", ""];
-  let total = { calls: 0, input: 0, output: 0, cost: 0 };
-  for (const [key, sum] of groups) {
-    out.push(`${key}: ${sum.calls} call(s), ${sum.input} input, ${sum.output} output tokens, $${sum.cost.toFixed(4)}${sum.failed ? `, ${sum.failed} failed` : ""}`);
-    total = { calls: total.calls + sum.calls, input: total.input + sum.input, output: total.output + sum.output, cost: total.cost + sum.cost };
-  }
-  out.push("", `Total: ${total.calls} call(s), ${total.input} input, ${total.output} output tokens, $${total.cost.toFixed(4)} (API list price; not a subscription invoice)`);
-  out.push("Input counts fresh, cache-written and cache-read tokens together. Codex usage is not included.");
-  return out.join("\n");
 }
 
 // ---- Project checks and the failure baseline -----------------------------------------
@@ -906,68 +877,16 @@ function resolvePlaywright(globalRoot) {
   };
 }
 
-// The Playwright MCP server config for a headless Claude call, or null when the global
-// @playwright/mcp package or its browser is missing.
-function playwrightMcpConfig(outputDir) {
-  const npm = spawnSync("npm root -g", { encoding: "utf8", windowsHide: true, shell: true, timeout: 60 * 1000 });
-  const root = (npm.stdout || "").trim();
-  if (npm.status !== 0 || !root) return null;
-  let installed;
-  try {
-    installed = resolvePlaywright(root);
-  } catch {
-    return null;
-  }
-  if (!fs.existsSync(installed.browser)) return null;
-  return {
-    mcpServers: {
-      playwright: {
-        command: process.execPath,
-        args: [installed.server, "--executable-path", installed.browser, "--headless", "--isolated", "--output-dir", outputDir],
-      },
-    },
-  };
-}
-
-async function responds(url) {
-  try {
-    await fetch(url, { signal: AbortSignal.timeout(3000), redirect: "manual" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Reuses an app already answering on the URL; otherwise starts it and waits until it answers.
-async function ensureApp(repoRoot, ui, logFile) {
-  if (await responds(ui.url)) return { ok: true, note: `app already running at ${ui.url}` };
-  if (!ui.startCommand) return { ok: false, note: `nothing answers at ${ui.url} and no start command is set (plan "- Start:" or verify.json ui.startCommand)` };
-  const out = fs.openSync(logFile, "w");
-  const child = spawn(ui.startCommand, { cwd: repoRoot, shell: true, windowsHide: true, detached: !isWindows, stdio: ["ignore", out, out] });
-  fs.closeSync(out);
-  const deadline = Date.now() + ui.readyTimeoutSec * 1000;
-  let exited = false;
-  child.on("error", () => (exited = true));
-  child.on("exit", () => (exited = true));
-  while (Date.now() < deadline && !exited) {
-    if (await responds(ui.url)) return { ok: true, child, note: `started \`${ui.startCommand}\`` };
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  killTree(child.pid);
-  return { ok: false, note: `\`${ui.startCommand}\` ${exited ? "exited" : `didn't answer at ${ui.url} within ${ui.readyTimeoutSec}s`}; see ${path.relative(repoRoot, logFile)}` };
-}
-
 
 module.exports = {
-  ensureApp,
   plansRel,
   codexRulesRel,
   planPattern,
   runClaudeAsync,
   runShellAsync,
   killTree,
-  usageSummary,
   workflowPaths,
+  fileHash,
   gitOut,
   treeExists,
   snapshot,
@@ -979,6 +898,7 @@ module.exports = {
   frontmatter,
   parsePhases,
   uiSettings,
+  frontendSpec,
   gateProblem,
   planChecklist,
   planProblems,
@@ -996,5 +916,4 @@ module.exports = {
   codexThreadState,
   findCodexSession,
   resolvePlaywright,
-  playwrightMcpConfig,
 };

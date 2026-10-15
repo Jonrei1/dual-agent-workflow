@@ -21,8 +21,6 @@ function fixture(options = {}) {
   const registered = new Set(options.registered || []);
   const env = {
     dryRun: Boolean(options.dryRun),
-    // Most tests cover both clients (--playwright-codex); the default is Claude only.
-    codex: "codex" in options ? options.codex : true,
     has: (command) => !(options.missingClients || []).includes(command),
     exists: (file) => file === installation.browser && browserReady,
     resolve: () => {
@@ -37,7 +35,7 @@ function fixture(options = {}) {
     run: (command, args, settings = {}) => {
       calls.push({ command, args, settings });
       if (args[0] === "root") return { status: options.rootFails ? 1 : 0, stdout: "C:/Tool Folder\n" };
-      if (args[1] === "get") return { status: registered.has(command) ? 0 : 1 };
+      if (args[1] === "get") return { status: registered.has(args[2]) ? 0 : 1 };
       if (command === "npm") {
         packageReady = !options.packageFails;
         return { status: packageReady ? 0 : 1 };
@@ -47,8 +45,8 @@ function fixture(options = {}) {
         return { status: browserReady ? 0 : 1 };
       }
       if (args[1] === "add") {
-        if (command === options.registrationFails) return { status: 1 };
-        registered.add(command);
+        if (args[4] === options.registrationFails) return { status: 1 };
+        registered.add(args[4]);
         return { status: 0 };
       }
       throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
@@ -57,27 +55,29 @@ function fixture(options = {}) {
   return { env, calls, records, prompts, installation };
 }
 
-test("by default only Claude gets Playwright, since Claude does the UI audits", async () => {
-  const f = fixture({ codex: undefined });
+const registrations = (f) => f.calls.filter((call) => call.command === "claude" && call.args[1] === "add");
+
+test("only Claude gets Playwright, since Claude does the UI audits", async () => {
+  const f = fixture();
   await setupPlaywright(f.env);
   const writes = f.calls.filter((call) => call.args[0] !== "root" && call.args[1] !== "get");
-  assert.deepEqual(writes.map((call) => call.command), ["npm", process.execPath, "claude"]);
+  assert.deepEqual(writes.map((call) => call.command), ["npm", process.execPath, "claude", "claude"]);
   assert.ok(!f.calls.some((call) => call.command === "codex"));
   assert.ok(f.records.every((record) => record.ok === true));
 });
 
-test("first setup installs the server and matching browser, then connects both clients", async () => {
+test("first setup installs the server and matching browser, then registers a headless and a headed server", async () => {
   const f = fixture();
   await setupPlaywright(f.env);
   const writes = f.calls.filter((call) => call.args[0] !== "root" && call.args[1] !== "get");
-  assert.deepEqual(writes.map((call) => call.command), ["npm", process.execPath, "claude", "codex"]);
   assert.deepEqual(writes[0].args, ["install", "-g", "@playwright/mcp"]);
   assert.deepEqual(writes[1].args, [f.installation.cli, "install", "chromium"]);
-  assert.deepEqual(writes[2].args.slice(0, 6), ["mcp", "add", "--scope", "user", "playwright", "--"]);
-  assert.deepEqual(writes[3].args.slice(0, 4), ["mcp", "add", "playwright", "--"]);
-  for (const call of writes.slice(2)) {
-    assert.deepEqual(call.args.slice(-6), [process.execPath, f.installation.server, "--executable-path", f.installation.browser, "--headless", "--isolated"]);
-  }
+  const [headless, headed] = registrations(f);
+  assert.deepEqual(headless.args.slice(0, 6), ["mcp", "add", "--scope", "user", "playwright", "--"]);
+  assert.deepEqual(headless.args.slice(-6), [process.execPath, f.installation.server, "--executable-path", f.installation.browser, "--headless", "--isolated"]);
+  assert.deepEqual(headed.args.slice(0, 6), ["mcp", "add", "--scope", "user", "playwright-headed", "--"]);
+  assert.deepEqual(headed.args.slice(-5), [process.execPath, f.installation.server, "--executable-path", f.installation.browser, "--isolated"]);
+  assert.ok(!headed.args.includes("--headless"), "the headed server opens a visible window");
   assert.equal(f.prompts.length, 1);
   assert.ok(f.records.every((record) => record.ok === true));
 });
@@ -89,14 +89,15 @@ test("repeat setup reuses packages and browser and preserves registrations witho
   f.prompts.length = 0;
   await setupPlaywright(f.env);
   assert.deepEqual(f.calls.map((call) => call.args[0]), ["root", "mcp", "mcp"]);
+  assert.deepEqual(f.calls.map((call) => call.args[2]), [undefined, "playwright", "playwright-headed"]);
   assert.equal(f.prompts.length, 0);
 });
 
-test("existing custom registration is kept when the other client needs connecting", async () => {
-  const f = fixture({ packageReady: true, browserReady: true, registered: ["claude"] });
+test("an existing registration is kept and only the missing server is added", async () => {
+  const f = fixture({ packageReady: true, browserReady: true, registered: ["playwright"] });
   await setupPlaywright(f.env);
-  assert.equal(f.calls.filter((call) => call.command === "claude" && call.args[1] === "add").length, 0);
-  assert.equal(f.calls.filter((call) => call.command === "codex" && call.args[1] === "add").length, 1);
+  assert.deepEqual(registrations(f).map((call) => call.args[4]), ["playwright-headed"]);
+  assert.ok(f.records.some((record) => record.step === "Playwright (claude)" && /kept/.test(record.note)));
 });
 
 test("dry run performs no commands, prompts or configuration writes", async () => {
@@ -128,19 +129,18 @@ test("package failure prevents browser download and MCP registration", async () 
   assert.ok(f.records.some((record) => record.step === "Playwright MCP" && record.ok === false));
 });
 
-test("one registration failure is reported without preventing the other client setup", async () => {
-  const f = fixture({ registrationFails: "claude" });
+test("one registration failure is reported without preventing the other server", async () => {
+  const f = fixture({ registrationFails: "playwright" });
   await setupPlaywright(f.env);
   assert.ok(f.records.some((record) => record.step === "Playwright (claude)" && record.ok === false));
-  assert.ok(f.records.some((record) => record.step === "Playwright (codex)" && record.ok === true));
+  assert.ok(f.records.some((record) => record.step === "Playwright headed (claude)" && record.ok === true));
 });
 
-test("a missing client is reported while the installed client gets browser tools", async () => {
+test("a missing Claude CLI is reported and nothing is registered", async () => {
   const f = fixture({ missingClients: ["claude"] });
   await setupPlaywright(f.env);
   assert.ok(f.calls.every((call) => call.command !== "claude"));
   assert.ok(f.records.some((record) => record.step === "Playwright (claude)" && record.ok === false));
-  assert.ok(f.records.some((record) => record.step === "Playwright (codex)" && record.ok === true));
 });
 
 test("npm root failure produces an actionable failure and makes no installations", async () => {

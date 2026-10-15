@@ -1,6 +1,6 @@
 {
   "name": "dual-agent-workflow",
-  "description": "Claude + Codex as one team: Claude plans, reviews and polishes the UI; Codex builds the backend and a first working frontend; local scripts gate and verify every phase, with a functional Playwright audit at close. One command installs Claude Code, Codex CLI, Playwright and graphify (Impeccable optional). Local only: never edits tracked files; plugin updates sync projects automatically.",
+  "description": "Claude + Codex as one team: Claude plans, reviews and polishes the UI; Codex builds the backend and a first working frontend; local scripts gate and verify every phase, with a functional Playwright audit (headless, or headed so you can watch) at close. Installs Claude Code, Codex CLI, Playwright, graphify and the ponytail and taste-skill plugins. Local only: never edits tracked files; plugin updates sync projects automatically.",
   "owner": {
     "name": "Jonrei",
     "url": "https://github.com/Jonrei1"
@@ -9,7 +9,7 @@
     {
       "name": "dual-agent-workflow",
       "source": "./",
-      "description": "Set up the Claude + Codex workflow in any project with one command (/dual-agent-workflow:setup). Claude + Codex as one team: Claude plans, reviews and polishes the UI; Codex builds the backend and a first working frontend; local scripts gate and verify every phase, with a functional Playwright audit at close. One command installs Claude Code, Codex CLI, Playwright and graphify (Impeccable optional). Local only: never edits tracked files; plugin updates sync projects automatically."
+      "description": "Set up the Claude + Codex workflow in any project with one command (/dual-agent-workflow:setup). Claude + Codex as one team: Claude plans, reviews and polishes the UI; Codex builds the backend and a first working frontend; local scripts gate and verify every phase, with a functional Playwright audit (headless, or headed so you can watch) at close. Installs Claude Code, Codex CLI, Playwright, graphify and the ponytail and taste-skill plugins. Local only: never edits tracked files; plugin updates sync projects automatically."
     }
   ]
 }
