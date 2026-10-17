@@ -33,7 +33,7 @@ const codexRulesRel = ".codex/workflow/CODEX.md";
 const planPattern = /^\.codex\/plans\/[^/]+\.md$/;
 
 // Changes under these paths are workflow state, not part of any phase.
-const workflowPaths = [":!plans", ":!.codex", ":!.claude", ":!.agents/skills/caveman", ":!.impeccable", ":!graphify-out", ":!CLAUDE.local.md"];
+const workflowPaths = [":!plans", ":!.codex", ":!.claude", ":!.agents/skills/caveman", ":!graphify-out", ":!CLAUDE.local.md"];
 // Changes under these never trigger a verification run on their own.
 const triggerIgnored = [...workflowPaths, ":!*.md"];
 

@@ -112,10 +112,8 @@ Rules for this mode:
   on, risky ordering.
 - End with: `PLAN REVIEW: APPROVE | CHANGES NEEDED`.
 
-If the impeccable skill is installed, use it for UI work and follow `PRODUCT.md` and
-`DESIGN.md`; run any impeccable command the plan names. If it isn't installed, follow the
-project's existing design conventions. Never commit impeccable's live-mode block
-(`impeccable-live-start` … `impeccable-live-end`).
+For UI work, use the Taste skill when available and follow the project's design conventions
+and any design requirements in the plan.
 
 Browser checks are Claude's job: the verify step audits UI phases with Playwright, and Claude
 does a final UI audit after the run. Run existing Playwright specs only when a gate names them.

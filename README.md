@@ -20,11 +20,10 @@ The workflow supports new or existing repositories and detects checks for severa
 | Codex CLI | Implements approved phases, runs gates and fixes findings | Carries a task through every phase from one handoff; optional plan review checks assumptions before implementation. |
 | Playwright MCP + Chromium | Claude's UI audit: a headless Claude run checks each UI phase in a real browser, and your Claude session does a final audit | Navigation, clicks, forms, console errors, failed requests, screenshots and several viewport sizes, judged against the plan's UI audit items. |
 | graphify | Shared codebase knowledge graph and search/read hooks | Helps find affected modules and dependents before editing, so plans include relevant files and checks. |
-| Impeccable (optional) | Design skills and UI feedback hooks | Uses `PRODUCT.md` and `DESIGN.md` to guide UI work and flag design issues during implementation. |
 | caveman | Optional terse replies | Reduces prose output; file reads, reasoning, tool results and reviews still consume usage. No fixed percentage saving is guaranteed. |
 | Autopilot helper and verification hook | Local Node scripts under `.codex/` | Track snapshots, run gates, launch reviews, record verdicts and close tasks. The scripts coordinate agents; they are not another model. |
 
-For example, for a checkout-page change, Claude can identify dependencies with graphify and, if you installed the optional Impeccable, specify the design with it. Codex implements the phases. Gates run executable assertions, Claude reviews each diff against the plan and audits the UI phases in a real browser with Playwright, in parallel.
+For example, for a checkout-page change, Claude can identify dependencies with graphify and specify the design using the separately managed Taste skill when available. Codex implements the phases. Gates run executable assertions, Claude reviews each diff against the plan and audits the UI phases in a real browser with Playwright, in parallel.
 
 ## Install once, configure each project
 
@@ -52,14 +51,13 @@ Open the target project and run:
 /claude-codex-workflow:setup --yes
 ```
 
-Before running the installer, Claude asks you two questions, because the installer itself cannot prompt from inside Claude:
+Before running the installer, Claude asks about graphify's install scope, because the installer itself cannot prompt from inside Claude:
 
 | Question | Asked when | Your choices |
 |---|---|---|
-| Install **Impeccable** (design skills and UI hooks)? | Always, unless you passed `--impeccable` or `--skip-impeccable` | Yes adds `--impeccable`; no adds `--skip-impeccable`. Optional, mainly useful for UI work. |
 | Install **graphify** for your user only, or globally? | Only when graphify isn't installed and you didn't pass `--graphify-scope` | **User** (recommended): into your home directory with `uv tool`, `pipx` or `pip --user`, no admin rights. **Global**: system-wide `pip`, shared by every user, usually needs admin/root rights. |
 
-`--yes` approves missing global tool installations (Claude Code and Codex CLI through npm), the Chromium download and missing Playwright MCP registrations. It does not answer the two questions above. The terminal installer asks them itself, with Impeccable defaulting to no and graphify defaulting to user. With `--yes`, `--dry-run` or no terminal, it skips Impeccable and uses the user scope for graphify. A headless Claude command cannot prompt and reports incomplete steps for you to address.
+`--yes` approves missing global tool installations (Claude Code and Codex CLI through npm), the Chromium download and missing Playwright MCP registrations. In the setup command, choose graphify's scope explicitly when it is missing. The terminal installer defaults to user scope with `--yes`, `--dry-run` or no terminal. A headless Claude command cannot prompt and reports incomplete steps for you to address.
 
 ### Without the plugin
 
@@ -90,7 +88,7 @@ The machine tools are shared across projects. Run full setup once on each develo
 | Claude rules and plan hook | Merges the `## Workflow` section and an `ExitPlanMode` hook that reminds Claude to confirm the role and hand the plan off | `CLAUDE.local.md`, `.claude/settings.local.json` |
 | Codex hooks | Merges the verify and graphify hook groups, retaining existing entries. If your team tracks `.codex/hooks.json`, it's left alone and the verify hook goes into the user-level file instead | `.codex/hooks.json`, or `~/.codex/hooks.json` |
 | Templates and skills | Creates the missing plan template and caveman skills; moves untracked plans from an old `plans/` folder | `.codex/plans/`, `.claude/skills/caveman/`, `.agents/skills/caveman/` |
-| Project integrations | Only if you opt in, runs `npx -y impeccable install --project --providers=claude,codex` (Impeccable writes shared files of its own). graphify's own project installers edit `CLAUDE.md`/`AGENTS.md`, so they run only with `--shared` | With Impeccable, design skills and hooks |
+| Project integrations | Runs graphify's project installers only with `--shared`, since they edit shared rules | `CLAUDE.md` and `AGENTS.md` |
 | Local-only ignores and checks | Hides every workflow path through `.git/info/exclude` (never `.gitignore`), and prints detected verification commands | `.git/info/exclude` and installer output |
 
 Setup never changes a file git tracks (a tracked file it would have written is reported and left alone), so `git status` stays clean. Re-running updates workflow-owned `.codex/` scripts and the `## Workflow` section in `CLAUDE.local.md`, and removes scripts an earlier version installed that the current one no longer ships (tracked in `.codex/workflow-manifest.json`, which is hidden like the other workflow files). Plan and caveman templates are refreshed only while you haven't edited them. If an older version of the workflow left sections in tracked `CLAUDE.md`, `AGENTS.md` or `.gitignore`, setup points them out; remove them with your team in a normal commit. Existing Playwright registrations are preserved and matching Chromium is reused.
@@ -101,7 +99,7 @@ Setup never changes a file git tracks (a tracked file it would have written is r
 
 | Flag | Effect |
 |---|---|
-| `--yes` | Approve missing machine tools and Playwright setup without installer prompts. Doesn't install Impeccable, and graphify uses the user scope. |
+| `--yes` | Approve missing machine tools and Playwright setup without installer prompts. graphify uses the user scope. |
 | `--dry-run` | Print intended actions without installing or writing files/configuration. |
 | `--tools-only` | Set up machine tools, Chromium and Playwright registrations; skip project files and integrations. |
 | `--project-only` | Configure the project using existing tools; skip machine installations, Chromium download and MCP registration. |
@@ -110,10 +108,7 @@ Setup never changes a file git tracks (a tracked file it would have written is r
 | `--shared` | Write the old team-wide layout instead of local files: sections in `CLAUDE.md` and `AGENTS.md`, `.gitignore` entries, and graphify's project installers. Tracked files change, so commit them as a team. |
 | `--graphify-scope=user` or `global` | Choose where a missing graphify is installed without being asked. Default `user`; `global` is system-wide `pip` and usually needs admin/root rights. |
 | `--skip-graphify` | Skip graphify's project integrations (only run with `--shared`); the tools stage still checks/installs graphify. |
-| `--impeccable` | Install Impeccable. Without it, a terminal installer asks; `--yes`, `--dry-run` and a non-interactive run skip it. |
-| `--skip-impeccable` | Don't install Impeccable and don't ask. |
-| `--impeccable-providers=codex` | Implies `--impeccable`; installs design skills only for Codex when Claude already uses the Impeccable plugin. |
-| `--sync` | Quiet, files-only upgrade of a project that already uses the workflow. Run by the plugin's SessionStart hook; no tools, prompts, graphify or Impeccable. |
+| `--sync` | Quiet, files-only upgrade of a project that already uses the workflow. Run by the plugin's SessionStart hook; no tools, prompts or graphify. |
 | `--update-sections` | With `--shared`: replace existing workflow sections in `CLAUDE.md` and `AGENTS.md` with bundled versions. Without it, `CLAUDE.local.md` is always kept current. |
 | `--root <dir>` | Configure the Git repository containing that directory. |
 
@@ -124,9 +119,8 @@ Setup never changes a file git tracks (a tracked file it would have written is r
 3. Review and trust the workflow hooks in Codex using `/hooks` when needed (`.codex/hooks.json`, or `~/.codex/hooks.json` when your team tracks the project file). Later hook changes require trusting them again.
 4. Allow the helper's `verify`, `triage` and `close` commands network access and a long timeout when Codex requests approval: they start headless Claude sessions.
 5. Once the project has code, build the initial graph with `/graphify .` in Claude Code. If you chose a user-scope graphify and `graphify` isn't found, add `~/.local/bin` (or the Python user scripts folder) to `PATH`.
-6. If you installed Impeccable, run `/impeccable init` for `PRODUCT.md`; for an existing UI, follow with `/impeccable document` for `DESIGN.md`. Use `/impeccable doctor` for an older design setup.
-7. Review detected checks and add `.codex/verify.json` if they are missing or unsuitable. For UI work, add its `ui` block so Claude can start and audit the app (see [Configure verification](#configure-verification)).
-8. Optional: run `node .codex/autopilot.js usage` after a task to see headless Claude token usage and cost.
+6. Review detected checks and add `.codex/verify.json` if they are missing or unsuitable. For UI work, add its `ui` block so Claude can start and audit the app (see [Configure verification](#configure-verification)).
+7. Optional: run `node .codex/autopilot.js usage` after a task to see headless Claude token usage and cost.
 
 ## Playwright browser tools
 
@@ -303,7 +297,6 @@ Every artifact below is local to your clone and hidden through `.git/info/exclud
 - **`stuck` run:** read the findings, resolve the code or plan decision, and let Claude send `handoff --continue`.
 - **`failed` run:** read the reason/logs, fix authentication, permissions, network or command failure, then continue. Helper-launched agent calls have a 30-minute timeout each.
 - **Wrong or missing checks:** inspect `--print-checks` and configure `.codex/verify.json`, especially for monorepos.
-- **Stale Impeccable context:** run `/impeccable doctor`. Remove its `impeccable-live-start`/`impeccable-live-end` block before committing a production app.
 
 ## Repository layout
 

@@ -102,12 +102,8 @@ files and never add them to `.gitignore`: teammates must not see workflow change
 - **graphify:** use `graphify query`, `path` and `explain` before reading many raw files.
   After all code edits for a task are complete, run `graphify update .` once at the end of
   the coding session. Do not run it between file edits.
-- **Design:** Impeccable is optional. If `/impeccable` is available or the project has
-  `.impeccable/`, use it for UI work; `PRODUCT.md` and `DESIGN.md` are the design context, and
-  UI plans name the impeccable command Codex should run and the DESIGN.md sections to follow.
-  Otherwise follow the project's existing design conventions and don't mention impeccable
-  commands in plans. Never commit impeccable's live-mode block (`impeccable-live-start` …
-  `impeccable-live-end` in the root layout).
+- **Design:** use the Taste skill when available for UI work. Include the design decisions
+  and relevant project conventions in UI plans so Codex can follow them.
 
 ### Closing a task
 

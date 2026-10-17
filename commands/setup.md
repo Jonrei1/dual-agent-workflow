@@ -1,23 +1,12 @@
 ---
-description: Install the tools (Claude Code, Codex CLI, Playwright, graphify) and set up the Claude + Codex workflow in this project, local only (no tracked file changes). Impeccable design skills are optional and asked about first.
-argument-hint: "[--yes] [--dry-run] [--tools-only|--project-only] [--impeccable|--skip-impeccable] [--graphify-scope=user|global] [--skip-playwright] [--playwright-codex] [--shared]"
+description: Install the tools (Claude Code, Codex CLI, Playwright, graphify) and set up the Claude + Codex workflow in this project, local only (no tracked file changes).
+argument-hint: "[--yes] [--dry-run] [--tools-only|--project-only] [--graphify-scope=user|global] [--skip-playwright] [--playwright-codex] [--shared]"
 allowed-tools: Bash(node:*), Bash(git status:*), Read, Write, Edit, AskUserQuestion
 ---
 
 Set up the Claude + Codex workflow in the current project.
 
-1. **Ask about Impeccable first.** Impeccable adds design skills and UI hooks, and it is
-   optional.
-   - If `$ARGUMENTS` has neither `--impeccable` nor `--skip-impeccable` (and isn't
-     `--tools-only`), ask the user with AskUserQuestion whether to install it.
-   - Say it is mainly useful for UI work, and that its own installer writes shared project
-     files.
-   - `--yes` does not answer this question.
-   - Add `--impeccable` to the installer arguments for yes, `--skip-impeccable` for no. If the
-     Impeccable plugin is already enabled in Claude Code, also add
-     `--impeccable-providers=codex` for yes, so the skill isn't loaded twice.
-
-   Also check whether graphify is installed (`graphify --version`).
+1. Check whether graphify is installed (`graphify --version`).
    - If it isn't, and `$ARGUMENTS` has no `--graphify-scope`, ask with AskUserQuestion where to
      install it:
      - for the current user only (recommended: no admin rights, uv/pipx/pip --user);
@@ -26,7 +15,7 @@ Set up the Claude + Codex workflow in the current project.
 2. From the project root, run:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/skills/claude-codex-workflow/scripts/install.js" $ARGUMENTS <the Impeccable and graphify-scope flags from step 1>
+   node "${CLAUDE_PLUGIN_ROOT}/skills/claude-codex-workflow/scripts/install.js" $ARGUMENTS <the graphify-scope flag from step 1, if needed>
    ```
 
    The installer can't prompt from here. If it reports tools as missing and the user
@@ -49,8 +38,7 @@ Set up the Claude + Codex workflow in the current project.
 
    See the claude-codex-workflow skill, "Checks".
 5. List the "Left for you" steps, and the new- or existing-project steps from the skill's
-   Setup section (`/graphify .`, and `/impeccable init` and `/impeccable document` only if
-   Impeccable was installed). Stress that the user must:
+   Setup section (`/graphify .`). Stress that the user must:
    - restart Claude Code, which loads `CLAUDE.local.md` and the plan hook;
    - keep a Codex session open in the repo, because Claude posts plans into it with
      `codex queue`.

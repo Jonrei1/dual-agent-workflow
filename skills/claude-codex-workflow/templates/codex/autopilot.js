@@ -426,15 +426,6 @@ Autopilot run. Follow "Closing a task" in CLAUDE.local.md. Read ${planRel}, the 
   log(`summary written: ${summary}`);
 }
 
-function notify(message) {
-  process.stdout.write("\x07");
-  if (isWindows) {
-    const text = message.replace(/'/g, "''").slice(0, 200);
-    const script = `[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');$n=New-Object System.Windows.Forms.NotifyIcon;$n.Icon=[System.Drawing.SystemIcons]::Information;$n.Visible=$true;$n.ShowBalloonTip(10000,'Autopilot','${text}','Info');Start-Sleep -Seconds 6;$n.Dispose()`;
-    run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { timeout: 20000 });
-  }
-}
-
 function printChecklist(plan) {
   const items = lib.planChecklist(repoRoot, slug, plan.text);
   console.log(`Plan: ${planRel} (risk: ${plan.meta.risk || "?"}, review: ${plan.meta.review || "none"}, ui: ${plan.meta.ui || "?"})\n`);
@@ -857,7 +848,6 @@ async function cmdClose() {
   await close();
   setStatus({ state: "done", step: "done", phase: "" });
   log(`=== done: ${planRel}. Nothing was committed; review the changes and commit them yourself.`);
-  notify(`${slug}: done. Claude is reviewing.`);
   console.log(`\nTask ${slug} done. Claude reviews it next; then review and commit the changes.`);
 }
 
@@ -897,7 +887,6 @@ async function cmdRun() {
     await close();
     setStatus({ state: "done", step: "done", phase: "" });
     log(`=== done: ${planRel}. Nothing was committed; review the changes and commit them yourself.`);
-    notify(`${slug}: done. Review and commit the changes.`);
     return 0;
   } catch (error) {
     if (error instanceof Stop) log(`resume with: node .codex/autopilot.js run ${planRel} --resume`);
@@ -946,7 +935,6 @@ async function main() {
     const stop = error instanceof Stop ? error : new Stop("failed", error.stack || String(error));
     setStatus({ state: stop.state, reason: stop.message });
     log(`=== ${stop.state}: ${stop.message}`);
-    notify(`${slug}: ${stop.state}`);
     console.error(`\n${stop.state.toUpperCase()}: ${stop.message}`);
     process.exitCode = exitCodes[stop.state] || exitCodes.failed;
   }

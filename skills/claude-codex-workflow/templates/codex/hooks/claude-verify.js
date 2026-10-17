@@ -239,7 +239,7 @@ function writeDiff(base, current) {
   fs.writeFileSync(diffPath, lib.diffText(repoRoot, base, current) || "(no changes outside workflow paths)\n");
 }
 
-const diffNote = `The change is in ${diffRel}: a diff from the last verified snapshot to the current working tree, new files included and workflow paths (.codex/, .claude/, .impeccable/, graphify-out/, CLAUDE.local.md) left out. Read all of it. Nothing is committed during the workflow, so don't look for commits.`;
+const diffNote = `The change is in ${diffRel}: a diff from the last verified snapshot to the current working tree, new files included and workflow paths (.codex/, .claude/, graphify-out/, CLAUDE.local.md) left out. Read all of it. Nothing is committed during the workflow, so don't look for commits.`;
 
 function planLabel(ctx) {
   return ctx.plan ? `${ctx.plan.rel} (phase ${ctx.plan.phase})` : "(none)";
@@ -303,11 +303,6 @@ function checksReport(results, fixerReport) {
     ? results.map((r) => `- \`${r.cmd}\`: ${verdict(r)}${(r.ok && !r.preexisting) || !r.tail ? "" : `\n${r.tail.replace(/^/gm, "    ")}`}`)
     : ["- No checks are configured for this repo, so none ran (add .codex/verify.json to define them)."];
   return [`Checks run by the verify script:`, ...lines, ...(fixerReport ? ["", "Claude fix step:", fixerReport] : [])].join("\n");
-}
-
-// Deterministic: flag an Impeccable live-mode block the change adds, in the diff's added lines.
-function addsLiveBlock(diff) {
-  return diff.split("\n").some((line) => line.startsWith("+") && /impeccable-live-start|localhost[^\s"']*\/live\.js/.test(line));
 }
 
 function checksTools(checks) {
@@ -517,7 +512,6 @@ async function runVerification() {
     ].join("\n"),
   );
 
-  const liveBlock = addsLiveBlock(lib.diffText(repoRoot, ctx.base.tree, ctx.current));
   const checksPromise = stepChecks(checks, task);
   const [checksResult, alignment, uiAudit] = await Promise.all([
     checksPromise,
@@ -525,7 +519,7 @@ async function runVerification() {
     stepUiAudit(ctx, task, taskDir, tag, checksPromise),
   ]);
 
-  const checksText = [liveBlock ? "MUST REMOVE BEFORE COMMIT: the change adds an Impeccable live-mode block.\n" : "", checksReport(checksResult.results, checksResult.fixerReport)].join("");
+  const checksText = checksReport(checksResult.results, checksResult.fixerReport);
   fs.appendFileSync(logPath, `${checksText}\n`);
   const carried = checksResult.results.filter((r) => r.preexisting).map((r) => r.cmd);
   const checksStatus = checks.length === 0 ? "none" : !checksResult.ok ? "fail" : carried.length ? `pass (pre-existing failures: ${carried.join(", ")})` : "pass";

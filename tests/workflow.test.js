@@ -31,7 +31,7 @@ function gitRepo() {
 }
 
 function install(dir, extra = [], env = {}) {
-  const result = spawnSync(process.execPath, [installer, "--project-only", "--skip-graphify", "--skip-impeccable", "--root", dir, ...extra], {
+  const result = spawnSync(process.execPath, [installer, "--project-only", "--skip-graphify", "--root", dir, ...extra], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, CODEX_HOME: path.join(dir, "..", `${path.basename(dir)}-codex-home`), ...env },
@@ -106,13 +106,17 @@ test("setup in a fresh repo creates and hides its own .codex/hooks.json", () => 
 
 test("an older workflow Stop hook is upgraded in place, not duplicated", () => {
   const dir = gitRepo();
+  const custom = { type: "command", command: "node custom-hook.js", commandWindows: "node custom-windows-hook.js", timeout: 10 };
   const old = "node -e \"const cp=require('node:child_process');const path=require('node:path');const root=cp.execFileSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8'}).trim();require(path.join(root,'.codex','hooks','claude-verify.js'))\"";
-  write(dir, ".codex/hooks.json", JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: old }] }] } }));
+  write(dir, ".codex/hooks.json", JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: old }, custom] }], PostToolUse: [{ matcher: "Edit", hooks: [custom] }] } }));
   const result = install(dir);
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
-  const stop = JSON.parse(read(dir, ".codex/hooks.json")).hooks.Stop;
+  const hooks = JSON.parse(read(dir, ".codex/hooks.json")).hooks;
+  const stop = hooks.Stop;
   assert.strictEqual(stop.length, 1);
   assert.match(stop[0].hooks[0].command, /existsSync/);
+  assert.deepStrictEqual(stop[0].hooks[1], custom);
+  assert.deepStrictEqual(hooks.PostToolUse, [{ matcher: "Edit", hooks: [custom] }]);
 });
 
 test("untracked plans from the old plans/ folder move to .codex/plans/", () => {
