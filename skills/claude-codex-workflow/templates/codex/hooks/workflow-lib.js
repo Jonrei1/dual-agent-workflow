@@ -27,13 +27,11 @@ const git = isWindows ? "git.exe" : "git";
 
 // Workflow locations, relative to the repo root.
 const plansRel = ".codex/plans";
-const tasksRel = ".codex/tasks";
-const verifyRel = ".codex/verify";
 const codexRulesRel = ".codex/workflow/CODEX.md";
 const planPattern = /^\.codex\/plans\/[^/]+\.md$/;
 
 // Changes under these paths are workflow state, not part of any phase.
-const workflowPaths = [":!plans", ":!.codex", ":!.claude", ":!.agents/skills/caveman", ":!graphify-out", ":!CLAUDE.local.md"];
+const workflowPaths = [":!.codex", ":!.claude", ":!graphify-out", ":!CLAUDE.local.md"];
 // Changes under these never trigger a verification run on their own.
 const triggerIgnored = [...workflowPaths, ":!*.md"];
 
@@ -85,7 +83,8 @@ function diffText(repoRoot, from, to, pathspec = workflowPaths) {
   return gitOut(repoRoot, ["diff", from, to, "--", ".", ...pathspec]);
 }
 
-// Per-task verify logs: .codex/verify/<slug>/. Reports without a task go to _untasked/.
+// Per-task verify logs and state: .codex/verify/<slug>/. Nothing is shared between tasks, so
+// reports from different tasks (or worktrees) never overwrite each other.
 function taskVerifyDir(repoRoot, slug) {
   return path.join(repoRoot, ".codex", "verify", slug || "_untasked");
 }
@@ -100,6 +99,16 @@ function readJsonFile(file) {
 
 function verifyConfig(repoRoot) {
   return readJsonFile(path.join(repoRoot, ".codex", "verify.json")) || {};
+}
+
+// sha256 of a file's contents, or "" when it doesn't exist. A run records these for the plan
+// and verify.json when it begins, so neither can be loosened mid-run to make a gate pass.
+function fileHash(file) {
+  try {
+    return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  } catch {
+    return "";
+  }
 }
 
 // ---- Plans -------------------------------------------------------------------------------
@@ -125,9 +134,8 @@ function labelBlock(body, label) {
   return match ? match[1].trim() : null;
 }
 
-// Phases in document order: { id, title, body, gates, commit, scope, steps, covers,
-// doneWhen, handsOff, uiAudit }. The first backticked span on each bullet under **Gate** is
-// a command. `commit` is the optional suggested commit message for the user.
+// Phases in document order: { id, title, body, gates, scope, steps, covers, doneWhen,
+// handsOff }. The first backticked span on each bullet under **Gate** is a command.
 function parsePhases(text) {
   const headings = [...text.matchAll(/^## Phase ([\w.]+):\s*(.+)$/gm)];
   return headings.map((heading, i) => {
@@ -142,20 +150,17 @@ function parsePhases(text) {
         if (command) gates.push(command[1].trim());
       }
     }
-    const commit = /\*\*(?:Suggested )?[Cc]ommit[^*]*:\*\*\s*`([^`]+)`/.exec(body);
     const covers = labelBlock(body, "Covers");
     return {
       id: heading[1],
       title: heading[2].trim(),
       body,
       gates,
-      commit: commit ? commit[1].trim() : "",
       scope: labelBlock(body, "Scope"),
       steps: labelBlock(body, "Steps"),
       covers: covers === null ? null : [...covers.matchAll(/\bA\d+\b/g)].map((m) => m[0]),
       doneWhen: labelBlock(body, "Done when"),
       handsOff: labelBlock(body, "Hands off"),
-      uiAudit: labelBlock(body, "UI audit"),
     };
   });
 }
@@ -192,10 +197,14 @@ function uiAuditSpec(text) {
     ? body.slice(checksAt.index + checksAt[0].length).split(/\r?\n/).map((line) => /^\s+[-*]\s*(.+)$/.exec(line)).filter(Boolean).map((m) => m[1].trim())
     : [];
   const viewports = value("Viewports").split(/[,\s]+/).map(Number).filter((n) => n > 0);
-  return { body, start: value("Start"), url: value("URL"), viewports, checks };
+  return { body, start: value("Start"), url: value("URL"), browser: value("Browser").toLowerCase().split(/\s/)[0], viewports, checks };
 }
 
 // Effective UI settings: the plan's ## UI audit section wins over .codex/verify.json "ui".
+// Claude builds the frontend and runs the audit itself (the headless alternative is gone), so
+// these are the spec it follows. headed: the user watches the browser. Claude asks for every
+// ui: yes plan and records the answer as `- Browser: headless | headed`; verify.json
+// ui.headed is the fallback.
 function uiSettings(repoRoot, text) {
   const config = verifyConfig(repoRoot).ui || {};
   const spec = (text && uiAuditSpec(text)) || {};
@@ -203,10 +212,21 @@ function uiSettings(repoRoot, text) {
     startCommand: (!isPlaceholder(spec.start) && spec.start) || config.startCommand || "",
     url: (!isPlaceholder(spec.url) && spec.url) || config.url || "",
     viewports: (spec.viewports && spec.viewports.length ? spec.viewports : config.viewports) || [375, 1280],
-    readyTimeoutSec: config.readyTimeoutSec || 90,
-    paths: Array.isArray(config.paths) ? config.paths : [],
+    browser: ["headless", "headed"].includes(spec.browser) ? spec.browser : typeof config.headed === "boolean" ? (config.headed ? "headed" : "headless") : "",
+    headed: spec.browser === "headed" || (!["headless", "headed"].includes(spec.browser) && config.headed === true),
     checks: spec.checks || [],
   };
+}
+
+// Frontend work is Claude's, never a Codex phase: pages, components, styles, templates and the
+// copy and accessibility in them. The plan lists it under `## Frontend (Claude)`.
+const frontendPattern = /\.(?:tsx|jsx|vue|svelte|astro|css|scss|sass|less|html|hbs|ejs|pug)\b|(?:^|[\s`,(/])(?:components?|pages?|views?|screens?|styles?|frontend|ui)\//i;
+
+function frontendSpec(text) {
+  const body = section(text, "Frontend \\(Claude\\)");
+  if (body === null) return null;
+  const covers = labelBlock(body, "Covers");
+  return { body, covers: covers === null ? [] : [...covers.matchAll(/\bA\d+\b/g)].map((m) => m[0]) };
 }
 
 const shellBuiltins = new Set(["cd", "echo", "test", "[", "true", "false", "exit", "set", "export", "env", "call", "if", "for"]);
@@ -271,7 +291,8 @@ function planChecklist(repoRoot, slug, text) {
 
   const ids = acceptanceIds(text);
   add(ids.length > 0, "acceptance items have ids (`- A1: ...`)");
-  const covered = new Set(phases.flatMap((phase) => phase.covers || []));
+  const frontend = meta.ui === "yes" ? frontendSpec(text) : null;
+  const covered = new Set([...phases.flatMap((phase) => phase.covers || []), ...(frontend ? frontend.covers : [])]);
   const uncovered = ids.filter((id) => !covered.has(id));
   add(uncovered.length === 0, "every acceptance item is covered by a phase", uncovered.join(", "));
   const unknown = [...covered].filter((id) => !ids.includes(id));
@@ -281,6 +302,7 @@ function planChecklist(repoRoot, slug, text) {
     const label = `Phase ${phase.id}`;
     const filled = (value) => value !== null && !isPlaceholder(value) && value.replace(/[.\s]/g, "") !== "";
     add(!isPlaceholder(phase.title), `${label}: title`);
+    add(!frontendPattern.test(phase.scope || ""), `${label}: **Scope:** is backend only (frontend files are Claude's: list them under ## Frontend (Claude), not in a phase)`, (frontendPattern.exec(phase.scope || "") || [""])[0].trim());
     add(filled(phase.scope), `${label}: **Scope:**`);
     add(filled(phase.steps), `${label}: **Steps:**`);
     add(phase.covers !== null && phase.covers.length > 0, `${label}: **Covers:** acceptance ids`);
@@ -304,7 +326,12 @@ function planChecklist(repoRoot, slug, text) {
     add(Boolean(ui.url), "UI audit URL (plan `- URL:` or verify.json ui.url)");
     add(Boolean(ui.startCommand), "UI audit start command (plan `- Start:` or verify.json ui.startCommand)");
     add(Boolean(spec && spec.checks.length), "UI audit has `- Checks:` items");
-    add(phases.some((phase) => phase.uiAudit && !isPlaceholder(phase.uiAudit)), "at least one phase has a **UI audit:** block");
+    const front = frontendSpec(text);
+    add(front !== null && front.body.replace(/\*\*Covers:\*\*[^\n]*/, "").replace(/<[^>]*>/g, "").trim() !== "", "ui: yes has a `## Frontend (Claude)` section listing the pages and components Claude builds");
+    add(Boolean(front && front.covers.length), "`## Frontend (Claude)` has `**Covers:**` acceptance ids");
+    const last = phases[phases.length - 1];
+    if (last) add(last.handsOff !== null && !isPlaceholder(last.handsOff) && last.handsOff.replace(/[.\s]/g, "") !== "", `Phase ${last.id}: **Hands off:** (the API contract Claude builds the frontend against)`);
+    add(Boolean(ui.browser), "UI audit browser is headless or headed (plan `- Browser:` or verify.json ui.headed); ask the user");
   }
   return items;
 }
@@ -318,11 +345,10 @@ function planProblems(repoRoot, slug, text) {
 
 // ---- Headless Claude calls -------------------------------------------------------------
 //
-// Every headless call goes through runClaude / runClaudeAsync, so all of them get the same
-// trimmed setup and the same usage record. Listing only the built-in tools a call needs
-// (--tools) cuts its fixed input from about 37k to 14k tokens, and --strict-mcp-config keeps
-// MCP tool schemas out unless the call passes its own --mcp-config (the UI audit's
-// Playwright server). Each call is appended to .codex/verify/usage.jsonl.
+// Every headless call goes through runClaudeAsync, so all of them get the same trimmed
+// setup. Listing only the built-in tools a call needs (--tools) cuts its fixed input from
+// about 37k to 14k tokens, and --strict-mcp-config keeps MCP tool schemas out unless the
+// call passes its own --mcp-config (the UI audit's Playwright server).
 //
 // Optional .codex/verify.json block:
 //   "headless": { "settingSources": "project,local" }
@@ -333,33 +359,10 @@ function headlessConfig(repoRoot) {
   return verifyConfig(repoRoot).headless || {};
 }
 
-function usagePath(repoRoot) {
-  return path.join(repoRoot, ".codex", "verify", "usage.jsonl");
-}
-
 // `allowed` holds permission patterns such as `Bash(npm test:*)`; the built-in tool a call
 // needs is the name before the parenthesis. MCP tools come from --mcp-config instead.
 function builtinTools(allowed) {
   return [...new Set(allowed.filter((pattern) => !pattern.startsWith("mcp__")).map((pattern) => pattern.replace(/\(.*$/, "")))];
-}
-
-function usageRecord(name, task, model, effort, parsed, ok) {
-  const usage = (parsed && parsed.usage) || {};
-  return {
-    time: new Date().toISOString(),
-    task: task || "",
-    name,
-    model,
-    effort,
-    ok,
-    inputTokens: usage.input_tokens || 0,
-    cacheCreationTokens: usage.cache_creation_input_tokens || 0,
-    cacheReadTokens: usage.cache_read_input_tokens || 0,
-    outputTokens: usage.output_tokens || 0,
-    turns: (parsed && parsed.num_turns) || 0,
-    costUsd: (parsed && parsed.total_cost_usd) || 0,
-    durationMs: (parsed && parsed.duration_ms) || 0,
-  };
 }
 
 // On Windows an npm install puts only claude.cmd on PATH, and spawn can't start a .cmd
@@ -383,7 +386,7 @@ function resolveClaude() {
   return claudeCommand;
 }
 
-function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], permissionMode, mcpConfig }) {
+function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], mcpConfig, jsonSchema, maxTurns }) {
   const claude = resolveClaude();
   const args = [
     ...claude.prefix,
@@ -395,8 +398,9 @@ function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], per
     "--strict-mcp-config",
     "--tools", builtinTools(allowed).join(","),
   ];
+  if (jsonSchema) args.push("--json-schema", JSON.stringify(jsonSchema));
+  if (maxTurns) args.push("--max-turns", String(maxTurns));
   if (mcpConfig) args.push("--mcp-config", mcpConfig);
-  if (permissionMode) args.push("--permission-mode", permissionMode);
   const { settingSources } = headlessConfig(repoRoot);
   if (settingSources) args.push("--setting-sources", String(settingSources));
   // The variadic flags go last so they can't swallow another option.
@@ -405,7 +409,7 @@ function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], per
   return { command: claude.command, args };
 }
 
-function finishClaude(repoRoot, options, result) {
+function finishClaude(result) {
   const stdout = (result.stdout || "").trim();
   let parsed = null;
   try {
@@ -414,43 +418,26 @@ function finishClaude(repoRoot, options, result) {
     parsed = null;
   }
   const text = parsed && typeof parsed.result === "string" ? parsed.result.trim() : stdout;
-  const ok = !result.error && result.status === 0 && !(parsed && parsed.is_error);
-  try {
-    fs.mkdirSync(path.dirname(usagePath(repoRoot)), { recursive: true });
-    fs.appendFileSync(usagePath(repoRoot), `${JSON.stringify(usageRecord(options.name, options.task, options.model, options.effort, parsed, ok))}\n`);
-  } catch {
-    // Usage logging must never fail a run.
-  }
-  return { status: result.status, error: result.error, text, stderr: (result.stderr || "").trim() };
+  return { status: result.status, error: result.error, structured: parsed?.structured_output, text, stderr: (result.stderr || "").trim() };
 }
 
-// Runs `claude -p` and returns { status, error, text, stderr }. `text` is the model's final
-// reply, taken from the JSON result; if the output isn't JSON, it falls back to raw stdout.
-function runClaude(repoRoot, options) {
-  const { command, args } = claudeArgs(repoRoot, options);
-  const result = spawnSync(command, args, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    windowsHide: true,
-    maxBuffer: 256 * 1024 * 1024,
-    ...(options.env ? { env: options.env } : {}),
-    ...(options.timeout ? { timeout: options.timeout } : {}),
-  });
-  return finishClaude(repoRoot, options, result);
-}
-
-// The same call without blocking, so independent review steps can run side by side.
+// Runs `claude -p` without blocking, so independent review steps can run side by side, and
+// resolves { status, error, structured, text, stderr }. `text` is the model's final reply,
+// taken from the JSON result; if the output isn't JSON, it falls back to raw stdout.
 function runClaudeAsync(repoRoot, options) {
   const { command, args } = claudeArgs(repoRoot, options);
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let settled = false;
+    // Declared before `done`: spawn can throw synchronously (on Windows, for example), and
+    // `done` then runs before any timer exists.
+    let timer = null;
     const done = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(finishClaude(repoRoot, options, { stdout, stderr, ...result }));
+      resolve(finishClaude({ stdout, stderr, ...result }));
     };
     let child;
     try {
@@ -459,11 +446,11 @@ function runClaudeAsync(repoRoot, options) {
       done({ status: null, error });
       return;
     }
-    const timer = options.timeout
+    timer = options.timeout
       ? setTimeout(() => {
-          child.kill();
-          done({ status: null, error: Object.assign(new Error(`timed out after ${options.timeout} ms`), { code: "ETIMEDOUT" }) });
-        }, options.timeout)
+        child.kill();
+        done({ status: null, error: Object.assign(new Error(`timed out after ${options.timeout} ms`), { code: "ETIMEDOUT" }) });
+      }, options.timeout)
       : null;
     child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
     child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
@@ -477,14 +464,21 @@ function runShellAsync(repoRoot, cmd, { timeout, env } = {}) {
   return new Promise((resolve) => {
     let output = "";
     let settled = false;
-    const child = spawn(cmd, { cwd: repoRoot, shell: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
+    let timer = null;
     const finish = (ok, status) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve({ cmd, ok, status, output: output.trim() });
     };
-    const timer = timeout ? setTimeout(() => { killTree(child.pid); finish(false, "timed out"); }, timeout) : null;
+    let child;
+    try {
+      child = spawn(cmd, { cwd: repoRoot, shell: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
+    } catch (error) {
+      finish(false, error.message);
+      return;
+    }
+    timer = timeout ? setTimeout(() => { killTree(child.pid); finish(false, "timed out"); }, timeout) : null;
     child.stdout.setEncoding("utf8").on("data", (chunk) => (output += chunk));
     child.stderr.setEncoding("utf8").on("data", (chunk) => (output += chunk));
     child.on("error", (error) => finish(false, error.message));
@@ -500,39 +494,6 @@ function killTree(pid) {
   } catch {
     try { process.kill(pid); } catch { /* already gone */ }
   }
-}
-
-// Sums .codex/verify/usage.jsonl, optionally for one task, grouped by step name.
-function usageSummary(repoRoot, task) {
-  let lines = [];
-  try {
-    lines = fs.readFileSync(usagePath(repoRoot), "utf8").split("\n").filter(Boolean);
-  } catch {
-    return "No usage recorded yet (.codex/verify/usage.jsonl).";
-  }
-  const rows = lines.map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
-  const picked = task ? rows.filter((row) => row.task === task) : rows;
-  if (picked.length === 0) return task ? `No usage recorded for ${task}.` : "No usage recorded yet.";
-  const groups = new Map();
-  for (const row of picked) {
-    const key = `${row.name.replace(/\d+/g, "N")} (${row.model}/${row.effort})`;
-    const sum = groups.get(key) || { calls: 0, input: 0, output: 0, cost: 0, failed: 0 };
-    sum.calls += 1;
-    sum.input += row.inputTokens + row.cacheCreationTokens + row.cacheReadTokens;
-    sum.output += row.outputTokens;
-    sum.cost += row.costUsd;
-    sum.failed += row.ok ? 0 : 1;
-    groups.set(key, sum);
-  }
-  const out = [task ? `Headless Claude usage for ${task}` : "Headless Claude usage, all tasks", ""];
-  let total = { calls: 0, input: 0, output: 0, cost: 0 };
-  for (const [key, sum] of groups) {
-    out.push(`${key}: ${sum.calls} call(s), ${sum.input} input, ${sum.output} output tokens, $${sum.cost.toFixed(4)}${sum.failed ? `, ${sum.failed} failed` : ""}`);
-    total = { calls: total.calls + sum.calls, input: total.input + sum.input, output: total.output + sum.output, cost: total.cost + sum.cost };
-  }
-  out.push("", `Total: ${total.calls} call(s), ${total.input} input, ${total.output} output tokens, $${total.cost.toFixed(4)} (API list price; not a subscription invoice)`);
-  out.push("Input counts fresh, cache-written and cache-read tokens together. Codex usage is not included.");
-  return out.join("\n");
 }
 
 // ---- Project checks and the failure baseline -----------------------------------------
@@ -708,7 +669,7 @@ function encodeFrame(text, { mask = true } = {}) {
 // Splits complete frames off the front of buffer: { frames: [{ opcode, text }], rest }.
 function decodeFrames(buffer) {
   const frames = [];
-  for (;;) {
+  for (; ;) {
     if (buffer.length < 2) break;
     const masked = (buffer[1] & 0x80) !== 0;
     let length = buffer[1] & 0x7f;
@@ -755,6 +716,7 @@ function codexAppServer(calls, { timeoutMs = 10000, env } = {}) {
     let upgraded = false;
     let nextId = 0;
     const pending = new Map();
+    let timer = null;
     const finish = (value) => {
       if (settled) return;
       settled = true;
@@ -767,7 +729,7 @@ function codexAppServer(calls, { timeoutMs = 10000, env } = {}) {
       }
       resolve(value);
     };
-    const timer = setTimeout(() => finish({ error: `no answer from the Codex app-server within ${timeoutMs / 1000}s` }), timeoutMs);
+    timer = setTimeout(() => finish({ error: `no answer from the Codex app-server within ${timeoutMs / 1000}s` }), timeoutMs);
     const send = (message) => child.stdin.write(encodeFrame(JSON.stringify(message)));
     const request = (method, params) =>
       new Promise((resolveCall, rejectCall) => {
@@ -791,7 +753,7 @@ function codexAppServer(calls, { timeoutMs = 10000, env } = {}) {
     };
     const run = async () => {
       try {
-        const init = await request("initialize", { clientInfo: { name: "claude-codex-workflow", version: "1" } });
+        const init = await request("initialize", { clientInfo: { name: "dual-agent-workflow", version: "1" } });
         if (init.error) return finish({ error: `initialize failed: ${init.error.message || JSON.stringify(init.error)}` });
         send({ method: "initialized" });
         const results = [];
@@ -806,7 +768,7 @@ function codexAppServer(calls, { timeoutMs = 10000, env } = {}) {
     };
     child.on("error", (error) => finish({ error: error.message }));
     child.on("close", (code) => finish({ error: `codex app-server proxy exited with ${code}${stderr.trim() ? `: ${stderr.trim().split(/\r?\n/)[0]}` : ""}` }));
-    child.stdin.on("error", () => {});
+    child.stdin.on("error", () => { });
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.stdout.on("data", (chunk) => {
       buffer = Buffer.concat([buffer, chunk]);
@@ -915,43 +877,16 @@ function resolvePlaywright(globalRoot) {
   };
 }
 
-// The Playwright MCP server config for a headless Claude call, or null when the global
-// @playwright/mcp package or its browser is missing.
-function playwrightMcpConfig(outputDir) {
-  const npm = spawnSync("npm root -g", { encoding: "utf8", windowsHide: true, shell: true, timeout: 60 * 1000 });
-  const root = (npm.stdout || "").trim();
-  if (npm.status !== 0 || !root) return null;
-  let installed;
-  try {
-    installed = resolvePlaywright(root);
-  } catch {
-    return null;
-  }
-  if (!fs.existsSync(installed.browser)) return null;
-  return {
-    mcpServers: {
-      playwright: {
-        command: process.execPath,
-        args: [installed.server, "--executable-path", installed.browser, "--headless", "--isolated", "--output-dir", outputDir],
-      },
-    },
-  };
-}
 
 module.exports = {
   plansRel,
-  tasksRel,
-  verifyRel,
   codexRulesRel,
   planPattern,
-  runClaude,
   runClaudeAsync,
   runShellAsync,
   killTree,
-  usageSummary,
   workflowPaths,
-  triggerIgnored,
-  gitRun,
+  fileHash,
   gitOut,
   treeExists,
   snapshot,
@@ -959,14 +894,11 @@ module.exports = {
   changedFiles,
   diffText,
   taskVerifyDir,
-  readJsonFile,
   verifyConfig,
   frontmatter,
-  isPlaceholder,
   parsePhases,
-  acceptanceIds,
-  uiAuditSpec,
   uiSettings,
+  frontendSpec,
   gateProblem,
   planChecklist,
   planProblems,
@@ -980,11 +912,8 @@ module.exports = {
   classifyFailure,
   encodeFrame,
   decodeFrames,
-  codexAppServer,
-  liveCodexThreads,
   pickCodexSession,
   codexThreadState,
   findCodexSession,
   resolvePlaywright,
-  playwrightMcpConfig,
 };

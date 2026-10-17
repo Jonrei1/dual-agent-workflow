@@ -1,19 +1,20 @@
 "use strict";
 
 const fs = require("node:fs");
-// Use the MCP package's Playwright dependency so the downloaded browser matches it. Shared with
-// the verify step's UI audit, which starts the same server for headless Claude.
+// Use the MCP package's Playwright dependency so the downloaded browser matches it.
 const { resolvePlaywright: resolveInstallation } = require("../templates/codex/hooks/workflow-lib");
 
-// Claude does the UI audits, so Playwright is registered for Claude. codex: true
-// (--playwright-codex) also registers it for Codex.
-async function setupPlaywright({ run, has, confirm, record, dryRun, codex = false, resolve = resolveInstallation, exists = fs.existsSync }) {
-  const clients = [
-    { command: "claude", add: ["mcp", "add", "--scope", "user", "playwright", "--"] },
-    ...(codex ? [{ command: "codex", add: ["mcp", "add", "playwright", "--"] }] : []),
-  ];
+// Claude builds every frontend and audits it itself, so Playwright is registered for Claude only, twice:
+// `playwright` runs headless, `playwright-headed` opens a visible window so the user can watch.
+// Claude picks one per UI plan after asking the user.
+const SERVERS = [
+  { name: "playwright", step: "Playwright (claude)", headless: true },
+  { name: "playwright-headed", step: "Playwright headed (claude)", headless: false },
+];
+
+async function setupPlaywright({ run, has, confirm, record, dryRun, resolve = resolveInstallation, exists = fs.existsSync }) {
   if (dryRun) {
-    record("Playwright MCP", null, `would install missing global @playwright/mcp, download its matching Chromium, and register a missing playwright server for Claude (user scope)${codex ? " and Codex" : ""}`);
+    record("Playwright MCP", null, "would install missing global @playwright/mcp, download its matching Chromium, and register missing playwright (headless) and playwright-headed servers for Claude (user scope)");
     return;
   }
   const globalRoot = run("npm", ["root", "-g"], { timeout: 60 * 1000 });
@@ -25,13 +26,15 @@ async function setupPlaywright({ run, has, confirm, record, dryRun, codex = fals
   let installed;
   try { installed = resolve(root); } catch { /* missing or incomplete package */ }
   const missing = [];
-  for (const client of clients) {
-    if (!has(client.command)) {
-      record(`Playwright (${client.command})`, false, `install ${client.command} first, then re-run setup`);
-    } else if (run(client.command, ["mcp", "get", "playwright"], { timeout: 60 * 1000 }).status === 0) {
-      record(`Playwright (${client.command})`, true, "existing registration kept; check /mcp for connection status");
-    } else {
-      missing.push(client);
+  if (!has("claude")) {
+    record("Playwright (claude)", false, "install claude first, then re-run setup");
+  } else {
+    for (const server of SERVERS) {
+      if (run("claude", ["mcp", "get", server.name], { timeout: 60 * 1000 }).status === 0) {
+        record(server.step, true, "existing registration kept; check /mcp for connection status");
+      } else {
+        missing.push(server);
+      }
     }
   }
   if ((!installed || !exists(installed.browser) || missing.length) &&
@@ -60,11 +63,11 @@ async function setupPlaywright({ run, has, confirm, record, dryRun, codex = fals
   }
   record("Playwright Chromium", true, "matching browser installed");
   // Absolute Node/server/browser paths avoid npx downloads and Windows .cmd launch issues.
-  const serverArgs = [installed.server, "--executable-path", installed.browser, "--headless", "--isolated"];
-  for (const client of missing) {
-    const result = run(client.command, [...client.add, process.execPath, ...serverArgs], { inherit: true });
-    record(`Playwright (${client.command})`, result.status === 0,
-      result.status === 0 ? "registered; restart the client and check /mcp" : "registration failed; re-run setup");
+  for (const server of missing) {
+    const serverArgs = [installed.server, "--executable-path", installed.browser, ...(server.headless ? ["--headless"] : []), "--isolated"];
+    const result = run("claude", ["mcp", "add", "--scope", "user", server.name, "--", process.execPath, ...serverArgs], { inherit: true });
+    record(server.step, result.status === 0,
+      result.status === 0 ? "registered; restart Claude Code and check /mcp" : "registration failed; re-run setup");
   }
 }
 

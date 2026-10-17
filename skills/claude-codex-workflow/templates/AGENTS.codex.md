@@ -1,126 +1,73 @@
 ## Codex execution
 
-Codex executes plans from `.codex/plans/<task>.md`. These plans, the verify reports and this
-file are local to this clone (hidden through `.git/info/exclude`); never add them to git or
-`.gitignore`. Read the whole plan first and follow its steps, **Covers**, **Done when** and
-**Hands off** for each phase. If a step is wrong or impossible, stop and report it; do not
-silently diverge from the plan.
+Read the whole .codex/plans/<task>.md first. Follow each phase's Scope, Steps, Covers,
+Done when and Hands off. Plans, reports and rules are local through .git/info/exclude;
+never add them to git or .gitignore. Never run git commit, git add, git stash or git push.
+Leave every change in the working tree for the user. Report changed files after each phase.
+If a step is wrong or impossible, stop and report it; do not silently diverge.
+You build the backend only. Never create or edit frontend files: pages, components, views,
+styles, templates, and the copy, markup or accessibility in them. Claude builds every frontend
+from the start, against the API contract in your last Hands off. If a phase seems to need
+frontend work, stop and report it.
+Never edit the plan or .codex/verify.json during a run: a change stops it.
+Work in ponytail mode when its plugin is installed (`$ponytail:ponytail`): the smallest change
+that solves the phase. Reuse existing code; add no dependency, config option or abstraction
+the phase's Steps don't call for; give new non-trivial logic one small test.
 
-After each phase, report the files changed. Never commit: the user commits by hand. Codex
-runs the phase's gate. Claude runs the project's full checks, the alignment review and, for UI
-phases, a Playwright UI audit afterward, in parallel in the background, so Codex doesn't need
-to run those unless the gate names them.
+### Full plan execution
+1. Run `node .codex/autopilot.js check .codex/plans/<task>.md`. Exit 1: report the problems.
+2. Run `node .codex/autopilot.js begin .codex/plans/<task>.md`. It snapshots the untouched
+   tree and records every gate/check as the failure baseline. Report a failure and stop.
+3. For each phase in document order (including intermediate ids such as 2.5):
+   - Run `node .codex/autopilot.js phase .codex/plans/<task>.md <N>`.
+   - Implement that phase. Read only its listed files before editing; use graphify for
+     other dependencies. Provide its Hands off before moving on. Keep changes within scope.
+   - Run `node .codex/autopilot.js verify .codex/plans/<task>.md <N>`.
+     Exit 0: go to the next phase. Exit 2: fix the listed new gate/check failures within
+     scope, then verify again; leave baseline failures alone. Exit 3: read
+     .codex/verify/<task>/alignment.md, fix every MISSING, PARTIAL and MUST FIX item and undo
+     OUT OF SCOPE changes (extra dependencies and abstractions included), then verify again.
+     COULD BE CUT items are advice.
+     Findings about code this phase did not touch should be reported, without changing it.
+     Exit 1 or 4: report the reason and end the turn. Three consecutive new gate/check
+     failures or a failed alignment after two reworks stop the run as stuck.
+4. Run `node .codex/autopilot.js close .codex/plans/<task>.md`. It runs graphify update . and
+   marks the run done. Claude then builds the frontend and writes the task summary.
+5. End with: `Task <task> done. Claude is reviewing it.`
 
-### Full plan execution (when asked "Execute .codex/plans/<task>.md")
+Keep going through all phases without asking between them. If scope, credentials, tools,
+a dependency or any other problem blocks execution, run
+`node .codex/autopilot.js stop .codex/plans/<task>.md --reason "<what blocks it>"`
+before ending your turn. Never leave an active run with no outcome.
+Verify may take several minutes and needs network access; allow a 30-minute
+command timeout. The helper owns snapshots, gates, project checks and graph updates.
+When asked to Continue, read .codex/autopilot/status.json, rerun the stopped step and continue.
 
-This is the default handoff: Claude posts one line into this session, and you run the whole
-plan here. `.codex/autopilot.js` does the snapshots, gates, Claude verification and the task
-summary; you do the implementation and the fixes.
-
-Every step has a "done when" and an "if it fails". Never end your turn in the middle of a run
-without either `close` (done) or `stop` (blocked): Claude is waiting on one of them.
-To stop, run `node .codex/autopilot.js stop .codex/plans/<task>.md --reason "<what blocks it>"`.
-
-1. **Check:** `node .codex/autopilot.js check .codex/plans/<task>.md`.
-   - Done when: it prints `Runnable.` (exit 0).
-   - If it fails: the run hasn't begun, so just stop and report the problems it lists.
-2. **Begin:** `node .codex/autopilot.js begin .codex/plans/<task>.md`.
-   - It also records the baseline: every gate and project check is run once on the untouched
-     tree. Errors already there before the task won't block later gates or checks. This can
-     take a minute.
-   - Done when: it prints `Phases, in order: ...` and the next command.
-   - If it fails: report the error and stop.
-3. **Plan review** (only if `begin` says plan review is on): do the "Plan review" below
-   (append `## Codex Findings` only), then `node .codex/autopilot.js triage .codex/plans/<task>.md`.
-   - Done when: `triage` prints the phases. Re-read the plan, because Claude may have added
-     phases or changed gates.
-   - If it fails: `stop` with the error.
-4. **For each phase**, in document order (including phases like "Phase 2.5"):
-   1. `node .codex/autopilot.js phase .codex/plans/<task>.md <N>`. Done when it prints
-      "Implement phase <N>".
-   2. Implement the phase following "Phase execution" below. Done when its **Done when** items
-      hold and its **Hands off** exists. If it can't be done within the phase's scope (it
-      needs files outside it, a dependency install, a decision, credentials), `stop` with the
-      reason. Don't change out-of-scope files to get past it.
-   3. `node .codex/autopilot.js verify .codex/plans/<task>.md <N>`, then act on its exit code:
-      - **0 (PASS):** done. Go to the next phase.
-      - **2 (gate failed):** the output lists what is new since the task started. Fix those
-        within the phase, then run verify again. Errors that were already in the repo don't
-        block the gate, so never "fix" unrelated files for it. If the new failure can't be
-        fixed within the phase, `stop` with the reason. After 3 gate failures in a row the
-        run stops itself.
-      - **3 (NEEDS REWORK):** the output includes `.codex/verify/alignment.md`. Fix every
-        MISSING and PARTIAL item, every check that still fails and every UI audit FAIL, and
-        undo every OUT OF SCOPE change, within the phase. If a finding is about code the
-        phase didn't touch, leave it and say so. Then run verify again.
-      - **1 or 4 (failed or stuck):** the run is already marked stopped. Report the reason the
-        command printed and end your turn.
-5. **Close:** `node .codex/autopilot.js close .codex/plans/<task>.md`. It runs `graphify update .`
-   and has Claude write `.codex/tasks/<date>-<task>.md`.
-   - Done when: it prints `Task <task> done.`
-   - If it fails: it marks the run failed itself. Report the reason.
-6. End your reply with: `Task <task> done. Claude is reviewing it.`
-
-Rules for this mode:
-- Don't stop between phases to ask. Keep going until `close`, a failure, a stuck run or `stop`.
-- If anything else blocks you (a command you can't run, a missing tool, a sandbox refusal you
-  can't get approved), `stop` with the reason before ending your turn.
-- `verify`, `triage` and `close` start headless Claude runs: they need network access
-  and take several minutes. Run them with a long timeout (30 minutes) and request
-  permission to run outside the sandbox if the sandbox blocks them.
-- Don't write `.codex/verify/phase.json` and don't run `graphify update` yourself; the
-  helper does both.
-- When asked to "Continue .codex/plans/<task>.md", read `.codex/autopilot/status.json` and
-  run the step that stopped again (for example `verify` for the same phase), then carry on.
+### Single-phase handoff
+For `Execute phase <N> of .codex/plans/<task>.md`, follow the same phase/verify protocol:
+run phase N (it begins and records the baseline if no run is active), implement, then verify N.
+On PAUSED, end the turn and report the next handoff --phase command. On the last phase's
+PASS, run close and handle its exit codes as above. Do not begin another phase in this turn.
 
 ### Phase execution
+Apply accepted plan findings. Do not change out-of-scope files to make a gate pass.
+Gates and project checks run first as a deduplicated, baseline-aware set, with builds last;
+only green checks reach the report-only Claude alignment review. Codex fixes new failures.
+Run existing Playwright specs when gates/checks name them. The helper owns the browser audit.
 
-- **Never run `git commit`, `git add`, `git stash` or `git push`.** The user commits by
-  hand. Leave every change in the working tree, including earlier phases' work and the
-  verify run's fixes.
-- Do exactly one phase per turn. Stop after it. Do not start the next phase.
-- Before editing, read only the files the phase lists. Use graphify for anything else.
-- Deliver what the phase's **Hands off** promises; the next phase is written against it.
-- Run the phase gate. If it fails, fix it within the phase. If you cannot, stop and say why
-  (in a full plan execution, with `node .codex/autopilot.js stop ... --reason "<why>"`).
-- Do not change files outside the phase scope. If you need to, stop and report it (same `stop`
-  command in a full plan execution).
-- **Single-phase mode** (asked "Execute phase <N> of .codex/plans/<task>.md"): the steps
-  below this one apply only here, not in a full plan execution.
-- When the phase is done, write `.codex/verify/phase.json` with
-  `{ "plan": ".codex/plans/<task>.md", "phase": "<N>" }`, so the verify run knows which
-  phase to review.
-- Run `graphify update .` once at the end of the phase.
-- End your reply with: `Phase <N> done. Gate: <command> -> <pass/fail>.`
-- **Full plan execution and autopilot runs** (the prompt says "Autopilot run"): skip
-  `phase.json`, `graphify update` and the end line above. `.codex/autopilot.js` runs the
-  gate and the verification, and runs graphify at the end.
-- Treat accepted Codex Findings as part of the plan. Execute intermediate phases
-  (for example "Phase 2.5") in order.
+Frontend work is Claude's: leave it alone, and expose what it needs (endpoints, types, data,
+errors) exactly as the last phase's Hands off describes.
 
-### Plan review (when asked "Review .codex/plans/<task>.md")
+### Plan review
+Plan review is performed before handoff by `autopilot.js review`, using read-only Codex.
+Do not edit or reorder the plan or app code. Return findings with phase, problem, file/graph
+evidence and proposed fix. Check missing files/dependents, test gates, acceptance clarity,
+Hands off interfaces and risky ordering. Propose intermediate phases without renumbering.
+Return APPROVE or CHANGES NEEDED in the requested schema; Claude assesses findings with the user.
 
-- Do not edit or reorder existing phases.
-- Do not edit app code.
-- Append a section `## Codex Findings` at the end of the plan.
-- For each finding: the phase it affects, what is wrong or missing, evidence (file path
-  or graphify result), and a proposed fix.
-- If a phase needs a prerequisite step, propose an intermediate phase (for example
-  "Phase 2.5") inside the findings. Do not renumber existing phases.
-- Check specifically: files that do not exist, missed dependents (use `graphify query`),
-  missing test gates, unclear acceptance criteria, a **Hands off** the next phase can't rely
-  on, risky ordering.
-- End with: `PLAN REVIEW: APPROVE | CHANGES NEEDED`.
+Use graphify query, path and explain before reading many raw files. Do not update the graph
+between edits; the helper runs graphify update . once at close.
 
-For UI work, use the Taste skill when available and follow the project's design conventions
-and any design requirements in the plan.
-
-Browser checks are Claude's job: the verify step audits UI phases with Playwright, and Claude
-does a final UI audit after the run. Run existing Playwright specs only when a gate names them.
-
-Use `graphify query`, `path` and `explain` before reading many raw files.
-
-<!-- After `graphify codex install` appends its graphify section (only with --shared), make sure that section ends with this rule. Use the same rule in the section `graphify claude install` adds to CLAUDE.md. -->
-
-- After all code edits for a task are complete, run `graphify update .` once at the end
-  of the coding session. Do not run it between file edits.
+Commands: check, review, handoff, wait, begin, phase, verify, stop, close.
+Exit codes: 0 pass/done/paused; 1 failed; 2 gate/check failure; 3 alignment rework;
+4 stuck; 5 paste the handoff line; 6 wait timeout.

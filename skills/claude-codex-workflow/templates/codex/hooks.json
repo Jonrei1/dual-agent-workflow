@@ -1,5 +1,5 @@
 {
-  "description": "Hooks for graph health and automatic Claude verification after Codex turns (Claude + Codex workflow).",
+  "description": "Graph health guard hooks.",
   "hooks": {
     "PreToolUse": [
       {
@@ -17,18 +17,6 @@
           {
             "type": "command",
             "command": "graphify hook-guard read"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node -e \"const cp=require('node:child_process');const fs=require('node:fs');const path=require('node:path');let root='';try{root=cp.execFileSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim()}catch{}const f=path.join(root,'.codex','hooks','claude-verify.js');if(root&&fs.existsSync(f))require(f);else console.log('{}')\"",
-            "commandWindows": "node -e \"const cp=require('node:child_process');const fs=require('node:fs');const path=require('node:path');let root='';try{root=cp.execFileSync('git.exe',['rev-parse','--show-toplevel'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim()}catch{}const f=path.join(root,'.codex','hooks','claude-verify.js');if(root&&fs.existsSync(f))require(f);else console.log('{}')\"",
-            "statusMessage": "Queueing Claude verification"
           }
         ]
       }
