@@ -11,7 +11,7 @@
 // ids (A1, A2...), then `## Phase <N>: <title>` sections with Scope, Steps, Covers, Done when,
 // Hands off and a **Gate** list of backticked commands. planChecklist() checks all of it.
 //
-// Agents never commit, so progress is tracked with snapshots: the git tree of the whole
+// Phase diffs use snapshots independently of Claude's commits: the git tree of the whole
 // working tree (tracked and untracked, ignore rules respected), written through a
 // temporary index. A snapshot is a tree object, not a commit; it's on no branch and is
 // never pushed. Diffing two snapshots shows exactly what a phase changed.

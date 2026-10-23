@@ -44,7 +44,7 @@ test("the rules wire in ponytail, taste-skill, the headed or headless question a
   assert.ok(claude.trimEnd().split("\n").length <= 100);
   assert.ok(/```md\n([\s\S]*?)```/.exec(claude)[1].trimEnd().split("\n").length <= 25);
   for (const term of ["AskUserQuestion", "manual phases", "review", "handoff", "wait", "final-ui-audit.md", ".codex/tasks/", "git commit"]) assert.ok(claude.includes(term), term);
-  for (const term of ['model: "haiku"', "### Frontend", "Claude builds every frontend, from the start", "## Frontend (Claude)", "backend only", "Don't write app files while the run is active", "/ponytail-review uncommitted", "redesign-existing-projects", "design-taste-frontend", "headed", "headless", "mcp__playwright-headed__*", "- Browser:", "worktree"]) assert.ok(claude.includes(term), term);
+  for (const term of ['model: "haiku"', "### Frontend", "Claude builds every frontend, from the start", "## Frontend (Claude)", "backend only", "Don't write app files while the run is active", "/ponytail-review", "redesign-existing-projects", "design-taste-frontend", "headed", "headless", "mcp__playwright-headed__*", "- Browser:", "worktree"]) assert.ok(claude.includes(term), term);
   assert.match(claude, /^<!-- dual-agent-workflow:end -->\n?$/m);
   const codex = read(path.join(templates, "AGENTS.codex.md"));
   assert.match(codex, /Never create or edit frontend files/);
@@ -60,6 +60,28 @@ test("the rules wire in ponytail, taste-skill, the headed or headless question a
   assert.match(template, /## Frontend \(Claude\)/);
   assert.doesNotMatch(template, /Polish focus|polishes the visuals/);
   assert.match(read(path.join(templates, "codex", "hooks", "claude-verify.js")), /ANY change to frontend files/);
+});
+
+test("Claude asks approval for every phase commit before continuing, with final QA across commits", () => {
+  const claude = read(path.join(templates, "CLAUDE.workflow.md"));
+  assert.match(claude, /handoff .*--phase N/);
+  assert.match(claude, /both automatic and manual modes/);
+  assert.match(claude, /Paused \(0\): review the passing phase, ask approval and commit, then handoff --phase/);
+  assert.match(claude, /After the approved commit succeeds, continue automatically; manual mode also waits/);
+  assert.match(claude, /Before every git commit \(phase, frontend, QA fix or retry\)/);
+  assert.match(claude, /ask with AskUserQuestion and wait for explicit approval/);
+  assert.match(claude, /Prior approval never covers another commit/);
+  assert.match(claude, /Never commit failed or unfinished phases/);
+  assert.match(claude, /git commit --only/);
+  assert.match(claude, /pre-existing user changes, stop and explain/);
+  assert.match(claude, /Rejected or pending approval, or a failed commit, blocks the next handoff/);
+  assert.match(claude, /never bypass hooks or treat silence as approval/);
+  assert.match(claude, /skip empty commits/);
+  assert.match(claude, /entire diff from recorded task-base HEAD\n  through the working tree \(including committed phases\)/);
+  assert.match(claude, /base HEAD and all checkpoint SHAs/);
+  assert.doesNotMatch(claude, /Never run git commit|\/ponytail-review uncommitted/);
+  assert.match(read(path.join(templates, "AGENTS.codex.md")), /Never run git commit, git add, git stash or git push/);
+  assert.match(read(path.join(templates, "plans", "_template.md")), /Suggested commit \(Claude proposes after PASS; requires approval\)/);
 });
 
 test("docs state the call counts and every doc names the two plugins", () => {

@@ -2,7 +2,7 @@
 
 A Claude Code plugin and standalone installer that lets Claude and Codex work on one Git project as a team. Claude plans, reviews and **builds every frontend itself, from the start**. Codex builds the backend only. Local scripts check every step in between. Two plugins keep the work small and good: **ponytail** (a senior developer and QA reviewer) and **taste-skill** (UI/UX direction). One setup command installs what's missing (Claude Code, Codex CLI, **Playwright MCP and Chromium**, graphify, ponytail, taste-skill) and wires the workflow into the project.
 
-Everything the workflow writes stays **local to your clone**. Plans, logs, task summaries and the agents' rules are hidden through `.git/info/exclude`, and setup never edits a file git tracks. Agents never commit, stage, stash or push. You review the working tree and commit it yourself.
+Everything the workflow writes stays **local to your clone**. Plans, logs, task summaries and the agents' rules are hidden through `.git/info/exclude`, and setup never edits a file git tracks. Claude prepares a commit after each reviewed, passing phase and always asks for your approval before committing, so you can backtrack by commit. It preserves unrelated work and never stashes or pushes. Codex and the helper never commit.
 
 > The plugin was called `claude-codex-workflow` before v3.1. Claude Code reserves plugin names that start with `claude-`, so it is now **`dual-agent-workflow`**. See [Upgrading](#upgrading). The GitHub repository keeps its name.
 
@@ -32,7 +32,7 @@ flowchart TD
     plan --> ask{"Who implements?<br/>(Claude asks every plan)"}
     ask -->|Claude implements| direct["Claude edits and runs checks"]
     ask -->|Codex implements| save["Plan saved to .codex/plans/&lt;task&gt;.md<br/>autopilot.js check"]
-    save -->|"handoff (codex queue)"| codex["Your open Codex session<br/>(ponytail mode)"]
+    save -->|"handoff --phase N (codex queue)"| codex["Your open Codex session<br/>(ponytail mode)"]
 
     subgraph loop ["For each phase"]
         codex --> build["Codex builds the phase<br/>backend only"]
@@ -40,17 +40,19 @@ flowchart TD
         verify -->|"new failure (exit 2)"| build
         verify -->|green| align["Headless Claude: alignment +<br/>senior-dev/QA lens"]
         align -->|"NEEDS REWORK (exit 3)"| build
+        align -->|intermediate PASS| checkpoint["Claude reviews phase, asks approval, commits"]
+        checkpoint -->|next phase| codex
     end
 
     align -->|last phase passes| close["close: graphify update"]
-    close --> review["Claude reviews reports and diff"]
+    close --> review["Claude asks approval and commits last backend phase"]
     review --> front["ui: yes: Claude builds the frontend<br/>taste-skill, against the API from Hands off"]
     front --> audit["Claude audits it with Playwright<br/>headless or headed"]
     audit --> qa
     direct --> qa["QA pass: /ponytail-review"]
     review -->|"ui: no"| qa
     qa --> summary["Task summary in .codex/tasks/"]
-    summary --> commit([You review and commit])
+    summary --> commit([Checkpoint SHAs for backtracking])
 ```
 
 ### One task, in order
@@ -68,7 +70,8 @@ sequenceDiagram
     You->>C: Describe the task
     C->>You: Who implements? Headed or headless browser? (AskUserQuestion)
     You->>C: Codex implements, headed
-    C->>A: check plan, then handoff
+    C->>C: Record base HEAD and existing changes
+    C->>A: check plan, then handoff --phase 1
     A->>X: Post the plan (codex queue)
     C->>A: wait (background)
     loop Every phase
@@ -77,14 +80,27 @@ sequenceDiagram
         A->>H: Alignment + QA review (read-only)
         H-->>A: PASS or NEEDS REWORK
         A-->>X: Exit code (0, 2 or 3)
+        opt Intermediate phase passes
+            A-->>C: wait returns: paused
+            C->>You: Show phase diff and message, ask commit approval
+            You->>C: Approve commit
+            C->>C: Commit phase
+            C->>A: handoff --phase next, then wait
+        end
     end
     X->>A: close
     A-->>C: wait returns: done
+    C->>You: Show last phase diff and message, ask commit approval
+    You->>C: Approve commit
+    C->>C: Commit last backend phase
     C->>C: Build the frontend (taste-skill)
     C->>P: Audit it, window visible if headed
-    C->>C: /ponytail-review
+    C->>C: QA full task diff from base HEAD, prepare frontend and fix commits
+    C->>You: Ask approval before each frontend or QA commit
+    You->>C: Approve each commit
+    C->>C: Commit only approved changes
     C->>You: Report and task summary
-    You->>You: Review the working tree and commit
+    C->>You: Base HEAD and phase checkpoint SHAs
 ```
 
 ### Who does what
@@ -92,7 +108,7 @@ sequenceDiagram
 | Part | Role in this setup | Why it helps |
 |---|---|---|
 | Claude Code (interactive) | Plans, asks who implements, **builds every frontend**, audits it, runs the QA pass, writes the task summary | Turns a request into acceptance criteria and phases; one owner for all UI means no Codex-builds-then-Claude-fixes rework |
-| Codex CLI | Implements approved phases: **the backend only**; fixes gate and alignment findings | Carries a task through every phase from one handoff; never touches frontend files |
+| Codex CLI | Implements approved phases: **the backend only**; fixes gate and alignment findings | Builds one phase per handoff so Claude can commit between phases; never touches frontend files |
 | Headless Claude | One read-only alignment and QA review per passing phase; frontend files in a Codex phase count as out of scope | A second opinion checked against the plan, with write tools denied |
 | ponytail | Senior dev and QA: the smallest change that solves the task, plus `/ponytail-review` | Fewer phases, no speculative dependencies or abstractions, a real QA pass |
 | taste-skill | UI/UX art direction while Claude builds the frontend | Less generic UI, with bounds so the work can't balloon |
@@ -197,7 +213,7 @@ Do this in every repository that should use the workflow, in your own clone. Sta
    - Every plan has acceptance ids, backend-only phases, runnable gates and explicit Hands off. `check` rejects a phase whose Scope names frontend files (pages, components, views, styles, templates).
    - With `ui: yes`, a `## Frontend (Claude)` section lists what Claude builds and which acceptance ids it covers, and a `## UI audit` section gives the start command, URL, viewports, browser and checks. The last phase's Hands off is the API Claude builds against.
 3. **Optional plan review.** For `review: codex` or `risk: high`, Claude runs `autopilot.js review`. That is one read-only `codex exec` call. Claude goes through the findings with you before the handoff.
-4. **Hand off.** `autopilot.js handoff` posts the plan into your open Codex session through `codex queue`.
+4. **Hand off.** Claude records base HEAD and existing changes, then `autopilot.js handoff --phase N` posts the first phase into your open Codex session through `codex queue`.
    - It picks the newest session in the repo, or the one pinned with `--thread <id>`.
    - It waits up to 90 seconds for one to open. Exit 5 prints a line to paste instead.
    - Claude then starts `autopilot.js wait` in the background.
@@ -207,18 +223,19 @@ Do this in every repository that should use the workflow, in your own clone. Sta
    - A new failure returns exit 2 to Codex with no model call. Three in a row stop the run.
 6. **Review each phase.** Once the checks are green, one read-only headless Claude call (Sonnet, or Opus for high risk) reviews the phase against Done when, Covers and Hands off, with a senior-dev and QA lens.
    - **MUST FIX** (a concrete failing case) and unrequested dependencies or abstractions return NEEDS REWORK (exit 3). **COULD BE CUT** is advice. A third failure stops the run.
+   - On intermediate PASS, `wait` returns paused. Claude reviews that phase, shows the files, diff summary and proposed message, and asks for approval before committing. After explicit approval and a successful commit, it automatically hands off the next phase and waits again. Pending or rejected approval and failed commits block continuation; empty phases are recorded without an empty commit. Every commit needs fresh approval, including retries, frontend and QA fixes; manual mode also waits before the next handoff.
 7. **Close.** `graphify update .` runs and the run is done. There is no UI step here: the frontend doesn't exist yet.
-8. **Claude reviews.** When `wait` returns, Claude reads the per-phase reports and spot-checks the diff.
+8. **Claude reviews.** When the run is done, Claude reads the reports, reviews the last backend phase and asks for approval before committing it. Commits use the suggested message or `<type>(<slug>): phase <N> - <title>`. Only phase changes are included; unrelated staged and unstaged work stays intact. If overlapping work cannot be isolated safely, Claude stops and explains.
 9. **Claude builds the frontend (`ui: yes`).** Once, as the finished design, and only after Codex is done, so its edits never show up in a phase diff.
    1. Builds what `## Frontend (Claude)` lists, guided by taste-skill (`redesign-existing-projects` for app screens, `design-taste-frontend` for new public pages), against the API from the last Hands off. No new dependency, design system or image sourcing unless the plan asks.
    2. Audits its own work with Playwright against `## UI audit`, at each viewport, with the server you chose (a visible window if headed). It fixes what fails, re-checks, runs the project checks and writes `final-ui-audit.md`.
    3. A backend defect it finds goes back to Codex in a rework plan, which it asks you about first.
-10. **QA pass.** Claude runs `/ponytail-review uncommitted`. It fixes mechanical Must findings and turns behavior problems into a rework plan, which it asks you about before sending to Codex. Should and Nice findings are only reported. The same pass runs after **Claude implements**, where Claude also builds the frontend.
-11. **Summary and commit.** Claude writes `.codex/tasks/<date>-<task>.md` and reports to you. You review the working tree and commit it.
+10. **QA pass.** Claude reviews each phase before committing; final `/ponytail-review` covers the full task diff from the recorded base HEAD through the working tree, including committed phases. It fixes mechanical Must findings and turns behavior problems into a rework plan, which it asks you about before sending to Codex. Should and Nice findings are only reported. The same pass runs after **Claude implements**, where Claude also builds the frontend.
+11. **Summary and commit.** Claude writes `.codex/tasks/<date>-<task>.md` and reports to you. Claude asks for approval before each separate commit of checked frontend work or reviewed QA fixes and lists the base HEAD and phase checkpoint SHAs for backtracking.
 
-If a run gets stuck or fails, Claude explains why and asks before sending `handoff --continue`.
+If a run gets stuck or fails, Claude explains why and asks before sending `handoff --phase N --continue` for the stopped phase, keeping the next commit checkpoint intact.
 
-With **manual phases**, `handoff --phase N` sends one phase at a time. A passing phase pauses the run, and `wait` prints the next `handoff --phase` command. `wait` also notices when a Codex turn ends or its session closes mid-run, and passes on Codex's last message. Snapshots use a temporary Git index and tree objects, so your staging area and branches are untouched.
+With **manual phases**, `handoff --phase N` sends one phase at a time. A passing phase pauses the run, and `wait` prints the next `handoff --phase` command. `wait` also notices when a Codex turn ends or its session closes mid-run, and passes on Codex's last message. Snapshots use a temporary Git index and tree objects. The helper leaves your staging area and branches untouched; Claude creates each phase commit only after your approval. Direct helper handoffs without `--phase` still run the full plan without intermediate Claude commits.
 
 ## Several developers, one repo
 

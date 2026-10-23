@@ -3,7 +3,7 @@
 Read the whole .codex/plans/<task>.md first. Follow each phase's Scope, Steps, Covers,
 Done when and Hands off. Plans, reports and rules are local through .git/info/exclude;
 never add them to git or .gitignore. Never run git commit, git add, git stash or git push.
-Leave every change in the working tree for the user. Report changed files after each phase.
+Leave phase changes in the working tree for Claude to review, request approval and commit. Report changed files after each phase.
 If a step is wrong or impossible, stop and report it; do not silently diverge.
 You build the backend only. Never create or edit frontend files: pages, components, views,
 styles, templates, and the copy, markup or accessibility in them. Claude builds every frontend
@@ -44,9 +44,10 @@ command timeout. The helper owns snapshots, gates, project checks and graph upda
 When asked to Continue, read .codex/autopilot/status.json, rerun the stopped step and continue.
 
 ### Single-phase handoff
+For Continue with a phase id, re-run the stopped step without resetting its snapshot; finish only that phase using this protocol.
 For `Execute phase <N> of .codex/plans/<task>.md`, follow the same phase/verify protocol:
 run phase N (it begins and records the baseline if no run is active), implement, then verify N.
-On PAUSED, end the turn and report the next handoff --phase command. On the last phase's
+On PAUSED, end the turn so Claude can review, ask approval and commit before the next handoff. Report the next handoff --phase command. On the last phase's
 PASS, run close and handle its exit codes as above. Do not begin another phase in this turn.
 
 ### Phase execution

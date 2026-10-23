@@ -366,7 +366,7 @@ test("wait returns when the run is done, with a summary, and 4 when it's stuck",
   const dir = workflowRepo();
   const since = new Date(Date.now() - 1000).toISOString();
   const status = (state) =>
-    write(dir, ".codex/autopilot/status.json", JSON.stringify({ slug: "add-badge", state, reason: state === "stuck" ? "phase 2 still needs rework" : "", updated: new Date().toISOString(), phases: { 1: { verdict: "PASS", alignment: "PASS", checks: "pass", ui: "not run" } } }));
+    write(dir, ".codex/autopilot/status.json", JSON.stringify({ slug: "add-badge", state, phase: state === "stuck" ? "2" : "", reason: state === "stuck" ? "phase 2 still needs rework" : "", updated: new Date().toISOString(), phases: { 1: { verdict: "PASS", alignment: "PASS", checks: "pass", ui: "not run" } } }));
   status("done");
   let result = autopilot(dir, ["wait", ".codex/plans/add-badge.md", "--since", since, "--timeout", "30"]);
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
@@ -376,7 +376,7 @@ test("wait returns when the run is done, with a summary, and 4 when it's stuck",
   status("stuck");
   result = autopilot(dir, ["wait", ".codex/plans/add-badge.md", "--since", since, "--timeout", "30"]);
   assert.strictEqual(result.status, 4, result.stdout + result.stderr);
-  assert.match(result.stdout, /handoff \.codex\/plans\/add-badge\.md --continue/);
+  assert.match(result.stdout, /handoff \.codex\/plans\/add-badge\.md --phase 2 --continue/);
 });
 
 // ---- explicit alignment verification ----
@@ -626,12 +626,18 @@ test("removed run command returns usage", () => {
 
 test("single-phase handoff begins automatically, pauses on PASS and wait names next phase", () => {
   const dir = workflowRepo();
+  write(dir, "base.txt", "base\n");
+  git(dir, "add", "--", "base.txt");
+  git(dir, "commit", "-qm", "base");
+  write(dir, "unrelated.txt", "user work\n");
+  git(dir, "add", "--", "unrelated.txt");
   write(dir, ".codex/verify.json", JSON.stringify({ checks: [], baseline: false }));
   const handed = autopilot(dir, ["handoff", ".codex/plans/add-badge.md", "--phase", "1", "--print"]);
   assert.strictEqual(handed.status, 5);
   assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/handoff.json")).phase, "1");
   const since = new Date(Date.now() - 1000).toISOString();
   assert.strictEqual(autopilot(dir, ["phase", ".codex/plans/add-badge.md", "1"]).status, 0);
+  write(dir, "phase.txt", "phase one\n");
   const claude = fakeClaude();
   const result = autopilot(dir, ["verify", ".codex/plans/add-badge.md", "1"], claude.env);
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
@@ -639,7 +645,17 @@ test("single-phase handoff begins automatically, pauses on PASS and wait names n
   const waited = autopilot(dir, ["wait", ".codex/plans/add-badge.md", "--since", since, "--timeout", "2"]);
   assert.strictEqual(waited.status, 0, waited.stdout + waited.stderr);
   assert.match(waited.stdout, /handoff .* --phase 2/);
+  // Claude's checkpoint must preserve other staged work and allow the next phase to start.
+  git(dir, "add", "--", "phase.txt");
+  git(dir, "commit", "--only", "-qm", "feat(add-badge): phase 1", "--", "phase.txt");
+  assert.strictEqual(git(dir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"), "phase.txt");
+  assert.strictEqual(git(dir, "diff", "--cached", "--name-only"), "unrelated.txt");
   assert.strictEqual(autopilot(dir, ["phase", ".codex/plans/add-badge.md", "2"]).status, 0);
+  const state = JSON.parse(read(dir, ".codex/autopilot/status.json"));
+  assert.strictEqual(lib.changedFiles(dir, state.phaseBase, lib.snapshot(dir)).length, 0);
+  const resumed = autopilot(dir, ["handoff", ".codex/plans/add-badge.md", "--phase", "2", "--continue", "--print"]);
+  assert.strictEqual(resumed.status, 5);
+  assert.match(resumed.stdout, /section Single-phase handoff\. Resume only phase 2/);
 });
 
 

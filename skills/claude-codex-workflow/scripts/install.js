@@ -78,6 +78,7 @@ const RETIRED = [
 const SECTION_END = "<!-- dual-agent-workflow:end -->";
 const results = [];
 const changed = [];
+const notices = [];
 
 function readJson(file) {
   try {

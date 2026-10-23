@@ -14,7 +14,12 @@ Daily operation is documented in [README](../../README.md#daily-use-what-happens
 Installed CLAUDE.local.md and .codex/workflow/CODEX.md own the agent instructions.
 There is one driver: the open Codex session reached by codex queue. Verify runs gates and
 project checks first, then one report-only alignment call. Close updates graphify;
-interactive Claude reads reports and writes the task summary.
+interactive Claude uses handoff --phase N, reviews each passing phase and asks for explicit commit approval, then automatically
+commits and hands off the next after approval (manual mode also waits before handoff). It records base HEAD and checkpoint SHAs
+in the task summary, preserves unrelated staged/unstaged work, and never stashes or pushes.
+Final QA covers the full diff from base HEAD, including committed phases; frontend and QA fixes
+get separate checked commits, each requiring fresh approval, including retries. Pending/rejected
+approval or failed commits block continuation; empty phases need no commit.
 Headless Claude calls = (phases + reworks) alignment calls, and no UI calls.
 Roles: Codex builds the backend only (a plan's phases never include frontend files). Claude builds
 every frontend itself from the start, after Codex finishes, and audits it with Playwright
@@ -145,6 +150,10 @@ started it. The plan and verify.json are hashed at begin; changing either mid-ru
 All commands use `node .codex/autopilot.js`. Exit codes: 0 pass/done/paused, 1 failed,
 2 gate/check failure, 3 alignment/UI rework, 4 stuck, 5 paste, 6 wait timeout.
 Single-phase handoffs pause after intermediate PASS and wait prints the next handoff command.
+Claude asks for approval and commits the passing phase before sending that command automatically
+(except manual mode). Always show the files, diff summary and message and wait for explicit approval
+before every commit; prior approval never covers another commit.
+The helper and Codex never commit; a direct full-plan handoff has no intermediate Claude checkpoints.
 
 ## Troubleshooting
 

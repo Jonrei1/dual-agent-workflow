@@ -29,8 +29,8 @@
 // `wait` watches the Codex session the plan went to: if Codex's turn ends (or the session
 // closes) while the run is still going, it marks the run stuck instead of waiting forever.
 //
-// Nothing is committed, staged or pushed: every change is left in the working tree for
-// the user to review and commit. Phases are tracked with snapshots (workflow-lib.js).
+// This helper never commits, stages or pushes. Claude uses one-phase handoffs, reviews and
+// asks approval and commits each passing phase before continuing. Snapshots track diffs (workflow-lib.js).
 // Progress: .codex/autopilot/status.json and .codex/autopilot/<slug>.log.
 
 const fs = require("node:fs");
@@ -335,10 +335,10 @@ function gateInputs() {
 // No quotes, semicolons or other shell metacharacters: the message goes through cmd.exe,
 // Windows and POSIX shells unchanged.
 function handoffMessage() {
-  if (flags.has("--continue")) {
-    return `Continue ${planRel}: read .codex/autopilot/status.json and re-run the step that stopped, then carry on. Follow ${lib.codexRulesRel}, section Full plan execution.`;
-  }
   const phase = flagValue("--phase");
+  if (flags.has("--continue")) {
+    return `Continue ${planRel}: read .codex/autopilot/status.json and re-run the step that stopped, then carry on. Follow ${lib.codexRulesRel}, section ${phase ? "Single-phase handoff" : "Full plan execution"}.${phase ? ` Resume only phase ${phase} and stop after it passes so Claude can ask approval and commit.` : ""}`;
+  }
   return phase
     ? `Execute phase ${phase} of ${planRel}. Follow ${lib.codexRulesRel}, section Single-phase handoff. Use phase and verify on the full-execution protocol.`
     : `Execute ${planRel}. Follow ${lib.codexRulesRel}, section Full plan execution.`;
@@ -437,11 +437,11 @@ function waitSummary(current, codexMessage = "") {
   if (codexMessage) lines.push(`\nCodex's last message:\n${tail(codexMessage.trim(), 1500).replace(/^/gm, "  ")}`);
   const plan = readPlan();
   if (current.state === "paused") {
-    lines.push(`\nNext phase: node .codex/autopilot.js handoff ${planRel} --phase ${current.nextPhase}`);
+    lines.push(`\nClaude: review the passing phase and ask for explicit approval before committing and continuing.\nNext phase: node .codex/autopilot.js handoff ${planRel} --phase ${current.nextPhase}`);
   } else if (current.state === "done") {
     lines.push(`\nNext (Claude): read the reports and spot-check the diff${plan.meta.ui === "yes" ? ", then build the frontend (## Frontend (Claude)) and audit it with Playwright" : ""}, run the QA pass, then write the task summary and report to the user.`);
   } else {
-    lines.push(`\nNext (Claude): explain why it stopped. After a fix, send it back with: node .codex/autopilot.js handoff ${planRel} --continue`);
+    lines.push(`\nNext (Claude): explain why it stopped. After a fix, send it back with: node .codex/autopilot.js handoff ${planRel} --phase ${current.phase || plan.phases[0].id} --continue`);
   }
   return lines.join("\n");
 }
@@ -651,8 +651,8 @@ async function cmdClose() {
   const result = await close();
   if (result) return result;
   setStatus({ state: "done", step: "done", phase: "" });
-  log(`=== done: ${planRel}. Nothing was committed; review the changes and commit them yourself.`);
-  console.log(`\nTask ${slug} done. Claude reviews it next; then review and commit the changes.`);
+  log(`=== done: ${planRel}. Claude reviews the last backend phase and asks approval before committing it.`);
+  console.log(`\nTask ${slug} done. Claude reviews the last backend phase and asks approval before committing it, then handles frontend and final QA.`);
 }
 
 async function main() {

@@ -48,7 +48,7 @@ Keep it small: the fewest backend phases that keep each diff reviewable (one is 
 **Hands off:** <what phase 2 relies on: files, exports, API shapes, data>
 **Gate (must pass):**
 - `<runnable command, e.g. npx tsc --noEmit>`
-**Suggested commit (optional, for you):** `<type>(<slug>): <summary>`
+**Suggested commit (Claude proposes after PASS; requires approval):** `<type>(<slug>): <summary>`
 
 ## Phase 2: <title>
 **Scope:** ...
@@ -58,4 +58,4 @@ Keep it small: the fewest backend phases that keep each diff reviewable (one is 
 **Done when:** ...
 **Gate (must pass):**
 - `<command>`
-**Suggested commit (optional, for you):** `<type>(<slug>): <summary>`
+**Suggested commit (Claude proposes after PASS; requires approval):** `<type>(<slug>): <summary>`
