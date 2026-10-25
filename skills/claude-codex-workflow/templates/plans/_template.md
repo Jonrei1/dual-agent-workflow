@@ -17,7 +17,7 @@ One or two sentences. What changes for the user.
 
 ## Acceptance
 Every item has an id, and every id is covered by a phase's `**Covers:**` (backend) or by the
-`## Frontend (Claude)` section's (UI). Phases are backend only: Codex never builds frontend files.
+`## Frontend (Claude)` section's (UI). Phases are non-UI (backend, functions, scraping): Codex never builds frontend files.
 - A1: <observable result, with the test command or endpoint check that proves it>
 - A2: <...>
 

@@ -5,10 +5,11 @@ Done when and Hands off. Plans, reports and rules are local through .git/info/ex
 never add them to git or .gitignore. Never run git commit, git add, git stash or git push.
 Leave phase changes in the working tree for Claude to review, request approval and commit. Report changed files after each phase.
 If a step is wrong or impossible, stop and report it; do not silently diverge.
-You build the backend only. Never create or edit frontend files: pages, components, views,
+You build the backend, standalone functions and logic, and web scraping. Never create or edit frontend files: pages, components, views,
 styles, templates, and the copy, markup or accessibility in them. Claude builds every frontend
 from the start, against the API contract in your last Hands off. If a phase seems to need
 frontend work, stop and report it.
+Scraping: test parsers against saved fixtures, never the live network in a gate; respect robots.txt, rate limits and site terms; keep credentials and API keys out of code.
 Never edit the plan or .codex/verify.json during a run: a change stops it.
 Work in ponytail mode when its plugin is installed (`$ponytail:ponytail`): the smallest change
 that solves the phase. Reuse existing code; add no dependency, config option or abstraction

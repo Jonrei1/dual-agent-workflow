@@ -21,7 +21,7 @@ Final QA covers the full diff from base HEAD, including committed phases; fronte
 get separate checked commits, each requiring fresh approval, including retries. Pending/rejected
 approval or failed commits block continuation; empty phases need no commit.
 Headless Claude calls = (phases + reworks) alignment calls, and no UI calls.
-Roles: Codex builds the backend only (a plan's phases never include frontend files). Claude builds
+Roles: Codex builds the backend, standalone functions and web scraping (a plan's phases never include frontend files), and Claude routes each plan to it by task type without asking. Claude builds
 every frontend itself from the start, after Codex finishes, and audits it with Playwright
 against the plan's `## UI audit`, so there is no Codex-builds-then-Claude-fixes rework.
 ponytail keeps changes small (Codex builds in its mode; Claude runs /ponytail-review as the QA

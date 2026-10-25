@@ -1,7 +1,7 @@
 {
   "name": "dual-agent-workflow",
-  "version": "4.0.0",
-  "description": "Claude + Codex as one team: Claude plans, reviews and polishes the UI; Codex builds the backend and a first working frontend; local scripts gate and verify every phase, with a functional Playwright audit (headless, or headed so you can watch) at close. Installs Claude Code, Codex CLI, Playwright, graphify and the ponytail and taste-skill plugins. Local only: never edits tracked files; plugin updates sync projects automatically.",
+  "version": "4.1.0",
+  "description": "Claude + Codex as one team: Claude plans, reviews and builds every frontend; Codex builds the backend, functions and web scraping, routed by task type; local scripts gate and verify every phase, and Claude audits its UI with Playwright (headless, or headed so you can watch). Installs Claude Code, Codex CLI, Playwright, graphify and the ponytail and taste-skill plugins. Local only: never edits tracked files; plugin updates sync projects automatically.",
   "repository": "github:Jonrei1/Claude-Codex-Workflow",
   "bin": {
     "dual-agent-workflow": "skills/claude-codex-workflow/scripts/install.js"

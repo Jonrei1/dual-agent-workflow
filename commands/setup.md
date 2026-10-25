@@ -46,7 +46,7 @@ Set up the Claude + Codex workflow in the current project.
 6. Explain the machine-level pieces, installed only with approval:
    - Playwright setup installs a global MCP server and matching Chromium, and registers it for
      Claude twice: `playwright` (headless) and `playwright-headed` (a visible window). Claude
-     builds every frontend itself and audits it with one of them; it asks which for every UI plan. Existing registrations are kept. Restart Claude
+     builds every frontend itself and audits it with one of them; it asks which for every UI plan. Backend, function and scraping work is routed to Codex automatically. Existing registrations are kept. Restart Claude
      and check `/mcp`.
    - ponytail (senior dev and QA) and taste-skill (UI/UX) are installed as user-scope plugins
      for Claude and Codex. `--skip-skills` opts out.

@@ -1,6 +1,6 @@
 # Dual-agent workflow (Claude + Codex)
 
-A Claude Code plugin and standalone installer that lets Claude and Codex work on one Git project as a team. Claude plans, reviews and **builds every frontend itself, from the start**. Codex builds the backend only. Local scripts check every step in between. Two plugins keep the work small and good: **ponytail** (a senior developer and QA reviewer) and **taste-skill** (UI/UX direction). One setup command installs what's missing (Claude Code, Codex CLI, **Playwright MCP and Chromium**, graphify, ponytail, taste-skill) and wires the workflow into the project.
+A Claude Code plugin and standalone installer that lets Claude and Codex work on one Git project as a team. Claude plans, reviews and **builds every frontend itself, from the start**. Codex builds the backend, standalone functions and web scraping, routed to it automatically by task type. Local scripts check every step in between. Two plugins keep the work small and good: **ponytail** (a senior developer and QA reviewer) and **taste-skill** (UI/UX direction). One setup command installs what's missing (Claude Code, Codex CLI, **Playwright MCP and Chromium**, graphify, ponytail, taste-skill) and wires the workflow into the project.
 
 Everything the workflow writes stays **local to your clone**. Plans, logs, task summaries and the agents' rules are hidden through `.git/info/exclude`, and setup never edits a file git tracks. Claude prepares a commit after each reviewed, passing phase and always asks for your approval before committing, so you can backtrack by commit. It preserves unrelated work and never stashes or pushes. Codex and the helper never commit.
 
@@ -35,7 +35,7 @@ flowchart TD
     save -->|"handoff --phase N (codex queue)"| codex["Your open Codex session<br/>(ponytail mode)"]
 
     subgraph loop ["For each phase"]
-        codex --> build["Codex builds the phase<br/>backend only"]
+        codex --> build["Codex builds the phase<br/>backend, functions, scraping"]
         build --> verify["verify: gates + project checks"]
         verify -->|"new failure (exit 2)"| build
         verify -->|green| align["Headless Claude: alignment +<br/>senior-dev/QA lens"]
@@ -107,8 +107,8 @@ sequenceDiagram
 
 | Part | Role in this setup | Why it helps |
 |---|---|---|
-| Claude Code (interactive) | Plans, asks who implements, **builds every frontend**, audits it, runs the QA pass, writes the task summary | Turns a request into acceptance criteria and phases; one owner for all UI means no Codex-builds-then-Claude-fixes rework |
-| Codex CLI | Implements approved phases: **the backend only**; fixes gate and alignment findings | Builds one phase per handoff so Claude can commit between phases; never touches frontend files |
+| Claude Code (interactive) | Plans, routes work by task type (asks only when unclear), **builds every frontend**, audits it, runs the QA pass, writes the task summary | Turns a request into acceptance criteria and phases; one owner for all UI means no Codex-builds-then-Claude-fixes rework |
+| Codex CLI | Implements approved phases: **backend, functions and scraping (no UI)**; fixes gate and alignment findings | Builds one phase per handoff so Claude can commit between phases; never touches frontend files |
 | Headless Claude | One read-only alignment and QA review per passing phase; frontend files in a Codex phase count as out of scope | A second opinion checked against the plan, with write tools denied |
 | ponytail | Senior dev and QA: the smallest change that solves the task, plus `/ponytail-review` | Fewer phases, no speculative dependencies or abstractions, a real QA pass |
 | taste-skill | UI/UX art direction while Claude builds the frontend | Less generic UI, with bounds so the work can't balloon |
@@ -217,7 +217,7 @@ Do this in every repository that should use the workflow, in your own clone. Sta
    - It picks the newest session in the repo, or the one pinned with `--thread <id>`.
    - It waits up to 90 seconds for one to open. Exit 5 prints a line to paste instead.
    - Claude then starts `autopilot.js wait` in the background.
-5. **Build each phase.** Codex builds the backend only. It runs `begin`, then `phase N`, implements within the phase's scope (in ponytail mode), and runs `verify N`.
+5. **Build each phase.** Codex builds the backend, standalone functions and web scraping (non-UI only); Claude routes each plan to it by task type without asking. It runs `begin`, then `phase N`, implements within the phase's scope (in ponytail mode), and runs `verify N`.
    - `begin` snapshots the untouched tree, records every failing check as a baseline, notes who started the run and hashes the plan and `.codex/verify.json`. Editing either mid-run stops the run, so gates can't be loosened to pass.
    - Gates and project checks run as one deduplicated set, concurrently, with builds last.
    - A new failure returns exit 2 to Codex with no model call. Three in a row stop the run.

@@ -8,7 +8,7 @@ One run per clone/worktree. Before editing or handing off, record HEAD and stage
 ### Roles
 **Claude builds every frontend, from the start.** Pages, components, views, styles, templates and
 the states, copy and accessibility in them are never given to Codex and never appear in a plan
-phase; Codex builds the backend and exposes the API Claude builds against. This avoids
+phase. **Codex builds everything non-UI: the backend and API, standalone functions and logic, and web scraping** (crawlers, parsers, extractors), and exposes the API Claude builds against. This avoids
 Codex-builds-then-Claude-fixes rework. Backend problems found while building the frontend go to Codex.
 Smallest change first (ponytail, when installed: /ponytail): reuse what exists, add no
 dependency, option or abstraction the task doesn't need, and plan the fewest phases that keep
@@ -16,19 +16,17 @@ each diff reviewable (one is fine). Explore only what the task needs: graphify q
 at most 2 Explore subagents with model: "haiku", only when the work spans many files.
 
 ### Plan and handoff
-- Ask on every new plan that changes app code, using AskUserQuestion: **Codex implements
-  (Claude orchestrates)**, **Claude implements**, or **Codex, manual phases**. The answer
-  holds for this plan only, and means the backend: Claude always builds the frontend.
-  Skip read-only questions and doc/config-only edits.
+- Route every new plan that changes app code by task type, without asking, and tell the user the route in one line: backend, function or scraping work means **Codex implements (Claude orchestrates)**; UI-only work means **Claude implements**; mixed work means Codex builds the non-UI phases and Claude the frontend after.
+  Ask with AskUserQuestion only when the type is unclear or the user wants **Claude implements** or **Codex, manual phases**; the choice holds for this plan only. Skip read-only questions and doc/config-only edits.
 - For ui: yes, also ask "Watch the browser (headed) or run headless?" and write the answer as
   `- Browser: headed` or `- Browser: headless` in the plan's `## UI audit`. Ask it again before
   any UI check you run outside a plan. List the pages and components you will build under
   `## Frontend (Claude)` with its `**Covers:**` ids; the last Codex phase's Hands off is the API.
 - Claude implements: for each phase, edit, run checks and QA, then request commit approval using the checkpoint rules below.
 - Codex implements: save the approved plan as .codex/plans/<slug>.md using _template.md. Its
-  phases are backend only (`check` rejects frontend files in a phase's Scope). Run
+  phases are backend only, functions and scraping (`check` rejects frontend files in a phase's Scope); scraping gates use saved fixtures, not live sites, and Steps note robots.txt/terms. Run
   `node .codex/autopilot.js check .codex/plans/<slug>.md` and fix what it lists.
-- For review: codex or risk: high, run `node .codex/autopilot.js review .codex/plans/<slug>.md`.
+- For review: codex or risk: high, run `node .codex/autopilot.js review .codex/plans/<slug>.md` with run_in_background: true (it takes minutes; the Bash default of 120000 ms kills it) and read its output when it exits.
   Assess the findings with the user, edit the plan as agreed, and run check again.
 - Run `node .codex/autopilot.js handoff .codex/plans/<slug>.md --phase N` for the first phase (timeout at least 150000 ms).
   Use one-phase handoffs in both automatic and manual modes. Name the codex queue session used; exit 5: show the paste line in its own code block.

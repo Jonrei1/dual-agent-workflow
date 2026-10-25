@@ -273,7 +273,7 @@ ${plan.text}`;
   console.log(`\nPLAN REVIEW: ${reviewed.verdict}`);
 }
 
-// Codex builds the backend only. Claude builds the frontend after the run and audits it itself
+// Codex builds the backend, functions and scraping (non-UI only). Claude builds the frontend after the run and audits it itself
 // with Playwright (headless or headed, as the plan's `- Browser:` says), so close has no UI
 // step: it only refreshes the graph.
 async function close() {

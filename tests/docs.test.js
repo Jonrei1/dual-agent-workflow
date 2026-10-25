@@ -47,6 +47,11 @@ test("the rules wire in ponytail, taste-skill, the headed or headless question a
   for (const term of ['model: "haiku"', "### Frontend", "Claude builds every frontend, from the start", "## Frontend (Claude)", "backend only", "Don't write app files while the run is active", "/ponytail-review", "redesign-existing-projects", "design-taste-frontend", "headed", "headless", "mcp__playwright-headed__*", "- Browser:", "worktree"]) assert.ok(claude.includes(term), term);
   assert.match(claude, /^<!-- dual-agent-workflow:end -->\n?$/m);
   const codex = read(path.join(templates, "AGENTS.codex.md"));
+  assert.match(claude, /backend and API, standalone functions and logic, and web scraping/);
+  assert.match(claude, /Route every new plan that changes app code by task type, without asking/);
+  assert.match(codex, /standalone functions and logic, and web scraping/);
+  assert.match(codex, /saved fixtures/);
+  assert.match(claude, /autopilot\.js review [^\n]*run_in_background: true/);
   assert.match(codex, /Never create or edit frontend files/);
   assert.match(codex, /Claude builds every frontend/);
   assert.match(codex, /ponytail/);
@@ -56,6 +61,7 @@ test("the rules wire in ponytail, taste-skill, the headed or headless question a
   assert.ok(/const context = `([\s\S]*?)`;/.exec(gate)[1].split("\n").length <= 5);
   assert.match(gate, /headed or headless/);
   assert.match(gate, /Claude builds all frontend itself/);
+  assert.match(gate, /without asking: backend, functions and scraping go to Codex/);
   const template = read(path.join(templates, "plans", "_template.md"));
   assert.match(template, /## Frontend \(Claude\)/);
   assert.doesNotMatch(template, /Polish focus|polishes the visuals/);
@@ -99,7 +105,7 @@ test("docs state the call counts and every doc names the two plugins", () => {
 });
 
 test("versions and manifests agree on v4", () => {
-  for (const file of ["package.json", ".claude-plugin/plugin.json"]) assert.strictEqual(JSON.parse(read(path.join(repo, file))).version, "4.0.0");
+  for (const file of ["package.json", ".claude-plugin/plugin.json"]) assert.strictEqual(JSON.parse(read(path.join(repo, file))).version, "4.1.0");
   const marketplace = JSON.parse(read(path.join(repo, ".claude-plugin", "marketplace.json")));
   assert.match(marketplace.plugins[0].description, /ponytail/);
   assert.ok(JSON.parse(read(path.join(repo, "package.json"))).files.includes("skills"));
