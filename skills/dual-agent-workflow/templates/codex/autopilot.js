@@ -60,7 +60,6 @@ const commands = ["check", "review", "handoff", "wait", "begin", "phase", "verif
 const command = commands.includes(positional[0]) ? positional.shift() : flags.has("--dry-run") ? "check" : "";
 const [planArg, phaseArg] = positional;
 const repoRoot = path.resolve(__dirname, "..");
-const isWindows = process.platform === "win32";
 const runDir = path.join(repoRoot, ".codex", "autopilot");
 const statusPath = path.join(runDir, "status.json");
 const handoffPath = path.join(runDir, "handoff.json");
@@ -131,15 +130,8 @@ function run(command, commandArgs, options = {}) {
   });
 }
 
-// Windows starts codex through a .cmd shim, which needs a shell. Arguments are quoted, and
-// the messages this script sends contain no shell metacharacters.
-function quoteArg(arg) {
-  return /[\s()]/.test(arg) ? `"${arg}"` : arg;
-}
-
 function runCodex(commandArgs, options = {}) {
-  if (!isWindows) return run("codex", commandArgs, options);
-  return run(["codex", ...commandArgs].map(quoteArg).join(" "), [], { shell: true, ...options });
+  return lib.runCodex(repoRoot, commandArgs, { timeout: callTimeoutMs, env: childEnv, ...options });
 }
 
 function snapshot() {
@@ -212,17 +204,27 @@ function gateNoteFor(phase, preexisting = []) {
     : note;
 }
 
-// Green gates and checks are followed by one read-only alignment review.
+// Green gates and checks are followed by one read-only alignment review. A Codex-only project
+// has one agent paying for every call, so it reviews once: on the last phase, over the whole
+// task's diff since `begin`. Earlier phases pass on their gates and checks.
 function verify(phase, phaseBase, preexisting = []) {
-  log(`verify: phase ${phase.id} (alignment after green gates and checks)`);
+  const planPhases = readPlan().phases;
+  const once = lib.workflowMode(repoRoot) === "codex";
+  if (once && planPhases[planPhases.length - 1].id !== phase.id) {
+    log(`verify: phase ${phase.id} passes on gates and checks; the alignment review runs once, on the last phase`);
+    setStatus({ phases: { ...(status.phases || {}), [phase.id]: { verdict: "PASS", alignment: "deferred", checks: "pass", preexisting } } });
+    return true;
+  }
+  const base = once && lib.treeExists(repoRoot, status.startTree) ? status.startTree : phaseBase;
+  log(`verify: phase ${phase.id} (alignment after green gates and checks${base === phaseBase ? "" : ", over the whole task"})`);
   const gateNote = gateNoteFor(phase, preexisting);
-  const result = run(process.execPath, [verifyScript, "--run", "--base", phaseBase, "--plan", planRel, "--phase", phase.id, "--gate", gateNote], {
+  const result = run(process.execPath, [verifyScript, "--run", "--base", base, "--plan", planRel, "--phase", phase.id, "--gate", gateNote], {
     timeout: 2 * callTimeoutMs,
   });
   if (result.error || result.status !== 0) throw new Stop("failed", `verification didn't run: ${result.error?.message || `exit ${result.status}`}`);
   const state = readJson(taskFile("state.json")) || {};
   const verdict = state.lastVerdict || "none";
-  if (verdict === "NOT RUN") throw new Stop("failed", `the Claude verification didn't start; see ${taskFileRel("last.log")}`);
+  if (verdict === "NOT RUN") throw new Stop("failed", `the alignment review didn't start; see ${taskFileRel("last.log")}`);
   log(`verdict: ${verdict} (alignment ${state.lastAlignment || "?"}, checks ${state.lastChecks || "?"}; see ${taskFileRel("alignment.md")})`);
   const phases = { ...(status.phases || {}) };
   phases[phase.id] = { verdict, alignment: state.lastAlignment, checks: state.lastChecks, preexisting, reports: `${state.lastReports || ""}/phase-${phase.id}.*` };
@@ -244,10 +246,6 @@ const reviewSchema = {
 function cmdReview() {
   const plan = readPlan();
   assertPlanValid(plan);
-  const schemaFile = path.join(runDir, `${slug}.review-schema.json`);
-  const outFile = path.join(runDir, `${slug}.review-output.json`);
-  fs.writeFileSync(schemaFile, JSON.stringify(reviewSchema, null, 2));
-  fs.rmSync(outFile, { force: true });
   const prompt = `Review this plan against the codebase. Do not edit the plan or any source file.
 Check files that do not exist, missed dependents (use graphify query when available), missing
 test gates, unclear acceptance criteria, Hands off interfaces the next phase cannot rely on,
@@ -259,12 +257,12 @@ Never commit, stage, stash or push.
 Plan: ${planRel}
 ${plan.text}`;
   log("codex: read-only plan review");
-  const result = runCodex(["exec", "--sandbox", "read-only", "--ephemeral", "--output-schema", schemaFile, "-o", outFile, "-"], { input: prompt });
-  const output = saveOutput("codex.review", result);
+  const result = lib.runCodexJson(repoRoot, { prompt, schema: reviewSchema, dir: runDir, name: `${slug}.review`, timeout: callTimeoutMs, env: childEnv });
+  const output = saveOutput("codex.review", { stdout: result.text });
   if (result.error || result.status !== 0) throw new Usage(`plan review failed: ${result.error?.message || `exit ${result.status}`}; see ${output}`);
-  const reviewed = readJson(outFile);
+  const reviewed = result.structured;
   if (!["APPROVE", "CHANGES NEEDED"].includes(reviewed?.verdict) || !Array.isArray(reviewed.findings) || reviewed.findings.some((item) => !item || ["phase", "problem", "evidence", "proposedFix"].some((key) => typeof item[key] !== "string"))) {
-    throw new Usage(`plan review returned invalid findings; see ${path.relative(repoRoot, outFile)}`);
+    throw new Usage(`plan review returned invalid findings; see ${path.relative(repoRoot, result.outFile)}`);
   }
   const reportDir = lib.taskVerifyDir(repoRoot, slug);
   fs.mkdirSync(reportDir, { recursive: true });
@@ -651,8 +649,11 @@ async function cmdClose() {
   const result = await close();
   if (result) return result;
   setStatus({ state: "done", step: "done", phase: "" });
-  log(`=== done: ${planRel}. Claude reviews the last backend phase and asks approval before committing it.`);
-  console.log(`\nTask ${slug} done. Claude reviews the last backend phase and asks approval before committing it, then handles frontend and final QA.`);
+  const next = lib.workflowMode(repoRoot) === "codex"
+    ? "Commit the last phase after approval, run the UI audit when ui: yes, then write the task summary."
+    : "Claude reviews the last backend phase and asks approval before committing it, then handles frontend and final QA.";
+  log(`=== done: ${planRel}. ${next}`);
+  console.log(`\nTask ${slug} done. ${next}`);
 }
 
 async function main() {

@@ -23,6 +23,8 @@ const diffPath = path.join(stateDir, "phase.diff");
 const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 const alignmentDefaults = { model: "sonnet", effort: "medium", riskModel: "opus", riskPaths: [] };
+// A Codex-only project has no Claude: its review runs as a read-only `codex exec` instead.
+const codexOnly = lib.workflowMode(repoRoot) === "codex";
 
 function readText(name) {
   try {
@@ -159,8 +161,8 @@ developer and QA engineer who prefers the smallest change that solves the task:
 - MUST FIX: a concrete failing case (input, state, wrong result) in code this phase touched:
   broken logic, unsafe input handling, lost data, an untested risky path. Only real defects.
 - OUT OF SCOPE also covers a new dependency, config option or abstraction the phase's Steps
-  didn't call for, and ANY change to frontend files (pages, components, views, styles,
-  templates): those belong to Claude, never to a Codex phase.
+  didn't call for${codexOnly ? "." : `, and ANY change to frontend files (pages, components, views, styles,
+  templates): those belong to Claude, never to a Codex phase.`}
 - COULD BE CUT: code that duplicates something existing or serves no listed step. Report only.
 - Style, naming and taste are not findings. Return the structured fields requested.
 The gates and project checks already ran; do not run checks or browser audits.
@@ -168,7 +170,7 @@ Nothing is committed. The diff includes new files and excludes local workflow st
 End text with VERDICT: PASS | NEEDS REWORK for clients that need a text verdict.
 
 Plan: ${ctx.plan.rel}
-Phase: ${ctx.plan.phase}
+Phase: ${ctx.plan.phase}${codexOnly ? " (the last phase: the diff covers the whole task, so check every phase's Done when and Covers)" : ""}
 Gate/check result: ${gateNote || "not supplied"}
 ${change}`;
 }
@@ -185,16 +187,19 @@ async function runVerification() {
   const diff = lib.diffText(repoRoot, ctx.base.tree, ctx.current) || "(no changes outside workflow paths)\n";
   fs.writeFileSync(diffPath, diff);
   fs.copyFileSync(diffPath, path.join(taskDir, `${tag}.diff`));
-  const model = ctx.risk ? ctx.config.riskModel : ctx.config.model;
-  fs.writeFileSync(logPath, `Alignment started ${new Date().toISOString()} | ${planLabel(ctx)} | ${model}/${ctx.config.effort}\n`);
-  const result = await lib.runClaudeAsync(repoRoot, {
-    name: "alignment", task, prompt: alignmentPrompt(ctx, flagValue("--gate"), diff),
-    model, effort: ctx.config.effort, allowed: alignmentTools, denied: alignmentDenied,
-    jsonSchema: alignmentSchema, maxTurns: 40, timeout: 30 * 60 * 1000,
-  });
+  const model = codexOnly ? "codex exec" : ctx.risk ? ctx.config.riskModel : ctx.config.model;
+  fs.writeFileSync(logPath, `Alignment started ${new Date().toISOString()} | ${planLabel(ctx)} | ${codexOnly ? model : `${model}/${ctx.config.effort}`}\n`);
+  const prompt = alignmentPrompt(ctx, flagValue("--gate"), diff);
+  const result = codexOnly
+    ? lib.runCodexJson(repoRoot, { prompt, schema: alignmentSchema, dir: stateDir, name: "alignment", timeout: 30 * 60 * 1000 })
+    : await lib.runClaudeAsync(repoRoot, {
+      name: "alignment", task, prompt,
+      model, effort: ctx.config.effort, allowed: alignmentTools, denied: alignmentDenied,
+      jsonSchema: alignmentSchema, maxTurns: 40, timeout: 30 * 60 * 1000,
+    });
   const started = !result.error && result.status === 0;
   const structured = result.structured;
-  const text = result.text || result.error?.message || result.stderr;
+  const text = result.text || result.error?.message || result.stderr || "";
   const verdicts = [...text.matchAll(/^[\s*_`>]*VERDICT:\s*(PASS|NEEDS REWORK)/gim)];
   const alignment = ["PASS", "NEEDS REWORK"].includes(structured?.verdict) ? structured.verdict : verdicts.at(-1)?.[1].toUpperCase() || "NEEDS REWORK";
   const unchanged = lib.snapshot(repoRoot) === ctx.current;
@@ -218,7 +223,7 @@ if (process.argv.includes("--print-checks")) {
   const checks = detectChecks();
   console.log(checks.length ? checks.join("\n") : "(no checks detected; add .codex/verify.json)");
   const config = alignmentConfig();
-  console.log(`Alignment: ${config.model}/${config.effort}, risk model ${config.riskModel}`);
+  console.log(codexOnly ? "Alignment: codex exec (read-only), once per task on the last phase" : `Alignment: ${config.model}/${config.effort}, risk model ${config.riskModel}`);
 } else if (process.argv.includes("--run")) {
   if (!flagValue("--plan") || !flagValue("--phase")) {
     console.error("--run requires --plan and --phase");

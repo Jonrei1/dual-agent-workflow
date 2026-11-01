@@ -4,18 +4,23 @@
 
 // One-command setup for the Claude + Codex workflow. Run it from the project root:
 //
-//   node <plugin>/skills/claude-codex-workflow/scripts/install.js [flags]
-//   npx github:Jonrei1/Claude-Codex-Workflow [flags]
+//   node <plugin>/skills/dual-agent-workflow/scripts/install.js [flags]
+//   npx github:Jonrei1/dual-agent-workflow [flags]
 //   /dual-agent-workflow:setup [flags]          (in Claude Code)
 //
-// 1. Tools: checks node, git, Claude Code, Codex CLI, Playwright, graphify and the two agent
-//    skills (ponytail and taste-skill), and installs the missing ones (global installs ask
-//    first unless --yes is given). Playwright MCP is registered for Claude, which does the UI
-//    audits: `playwright` (headless) and `playwright-headed` (a visible window).
-// 2. Project, local only: copies the workflow scripts and Codex rules into .codex/, merges
-//    the Claude rules into CLAUDE.local.md and an ExitPlanMode hook into
-//    .claude/settings.local.json, merges .codex/hooks.json, and hides all of it through
-//    .git/info/exclude. Then it prints the detected checks.
+// Mode: both agents (default), or one with --claude-only / --codex-only. The mode is kept in
+// .codex/workflow-manifest.json, so sync and later runs keep it until the other flag is given.
+//
+// 1. Tools: checks node, git, Claude Code and/or Codex CLI, Playwright, graphify (and its skill
+//    for each agent) and the agent plugins (ponytail, taste-skill, caveman), and installs the
+//    missing ones (global installs ask first unless --yes is given). Playwright MCP is
+//    registered for the agent that builds the frontend (Claude, or Codex when it works alone):
+//    `playwright` (headless) and `playwright-headed` (a visible window).
+// 2. Project, local only: copies the workflow scripts into .codex/, writes the rules for the
+//    agents in use (CLAUDE.local.md section, .codex/workflow/CODEX.md), merges the ExitPlanMode
+//    and graphify hooks into .claude/settings.local.json and the Codex hooks into
+//    .codex/hooks.json, and hides all of it through .git/info/exclude. Then it prints the
+//    detected checks.
 //
 // It never modifies a file git tracks, so setting up the workflow leaves `git status` clean
 // and can't cause merge conflicts for teammates: every developer sets up their own clone. The
@@ -32,6 +37,7 @@
 //   --sync                      quiet, files-only upgrade of an already-set-up project (used by the
 //                               plugin's SessionStart hook): no tools, prompts or graphify
 //   --yes                       approve missing global tools, Playwright setup and the agent skills
+//   --claude-only | --codex-only  set the workflow up for one agent (default: Claude + Codex)
 //   --tools-only | --project-only
 //   --dry-run                   print what would happen, change nothing
 //   --graphify-scope=<s>        user (default) or global; asked on a terminal when graphify is missing
@@ -45,6 +51,7 @@ const readline = require("node:readline");
 const { spawnSync } = require("node:child_process");
 const { setupPlaywright } = require("./playwright");
 const { setupSkills } = require("./skills");
+const lib = require("../templates/codex/hooks/workflow-lib");
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
@@ -58,6 +65,9 @@ const flagValue = (name) => {
 const isWindows = process.platform === "win32";
 const dryRun = flag("--dry-run");
 const sync = flag("--sync");
+const modeFlag = flag("--claude-only") ? "claude" : flag("--codex-only") ? "codex" : "";
+// The agents a mode uses.
+const agents = (mode) => (mode === "dual" ? ["claude", "codex"] : [mode]);
 let projectDir = "";
 const templates = path.join(__dirname, "..", "templates");
 const pluginRoot = path.join(__dirname, "..", "..", "..");
@@ -186,8 +196,23 @@ function findGraphify() {
   return found ? found.split(path.sep).join("/") : "";
 }
 
-async function installTools() {
-  console.log("\nTools");
+// graphify's skill teaches an agent to query the graph instead of reading raw files. It is
+// installed per user (graphify install --platform <agent>), not into the project.
+function graphifySkillFile(client) {
+  const base = client === "claude" ? process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude") : path.join(os.homedir(), ".codex");
+  return path.join(base, "skills", "graphify", "SKILL.md");
+}
+
+async function setupGraphifySkills(graphify, clients) {
+  for (const client of clients) {
+    const step = `graphify skill (${client})`;
+    if (fs.existsSync(graphifySkillFile(client))) record(step, true, "present");
+    else if (await install(step, graphify, ["install", "--platform", client])) record(step, fs.existsSync(graphifySkillFile(client)), graphifySkillFile(client));
+  }
+}
+
+async function installTools(mode) {
+  console.log(`\nTools (${mode === "dual" ? "Claude + Codex" : `${mode} only`})`);
   const major = Number(process.versions.node.split(".")[0]);
   record("node", major >= 18, major >= 18 ? process.version : `${process.version}; need 18 or newer`);
   const gitVersion = has("git");
@@ -196,21 +221,21 @@ async function installTools() {
   for (const tool of [
     { step: "Claude Code", command: "claude", pkg: "@anthropic-ai/claude-code" },
     { step: "Codex CLI", command: "codex", pkg: "@openai/codex" },
-  ]) {
+  ].filter((tool) => agents(mode).includes(tool.command))) {
     let version = has(tool.command);
     if (!version && (await install(tool.step, "npm", ["install", "-g", tool.pkg]))) version = has(tool.command);
     if (version) record(tool.step, true, version);
     else if (!dryRun && !results.some((r) => r.step === tool.step)) record(tool.step, false, `\`npm install -g ${tool.pkg}\` failed`);
   }
-  if (has("codex") && !dryRun && run("codex", ["login", "status"], { timeout: 60 * 1000 }).status !== 0) {
+  if (mode !== "claude" && has("codex") && !dryRun && run("codex", ["login", "status"], { timeout: 60 * 1000 }).status !== 0) {
     record("Codex login", false, "run `codex login`");
   }
 
   if (flag("--skip-playwright")) record("Playwright setup", null, "skipped (--skip-playwright)");
-  else await setupPlaywright({ run, has, confirm, record, dryRun });
+  else await setupPlaywright({ run, has, confirm, record, dryRun, client: mode === "codex" ? "codex" : "claude" });
 
-  if (flag("--skip-skills")) record("Skills (ponytail, taste-skill)", null, "skipped (--skip-skills)");
-  else await setupSkills({ run, has, confirm, record, dryRun });
+  if (flag("--skip-skills")) record("Skills (ponytail, taste-skill, caveman)", null, "skipped (--skip-skills)");
+  else await setupSkills({ run, has, confirm, record, dryRun, clients: agents(mode) });
 
   let graphify = findGraphify();
   if (!graphify) {
@@ -233,6 +258,7 @@ async function installTools() {
   }
   if (graphify) {
     record("graphify", true, graphify === "graphify" ? has("graphify") : `${graphify} (not on PATH; add its folder to PATH)`);
+    if (!flag("--skip-graphify")) await setupGraphifySkills(graphify, agents(mode));
   } else if (!dryRun && !results.some((r) => r.step === "graphify")) {
     record("graphify", false, "installed but not found; add ~/.local/bin to PATH and re-run");
   }
@@ -334,8 +360,7 @@ function copyOwned(root, from, to) {
 // Files the user may customize: created when missing, and refreshed to the plugin's version
 // only while they still match what an earlier run installed (the manifest holds its hash).
 // Edited files are kept.
-function copyManaged(root, from, to, previous) {
-  const source = fs.readFileSync(path.join(templates, from), "utf8");
+function copyManaged(root, source, to, previous) {
   const current = readText(path.join(root, to));
   if (current === null) return write(path.join(root, to), source, to, "created");
   if (current === source) return record(to, true, "up to date");
@@ -396,15 +421,15 @@ function mergeSection(root, file, section, heading) {
 }
 
 // Merges the template hook groups into a Codex hooks file. Groups whose commands are already
-// present are skipped, and hooks from the old workflow Stop hook (claude-verify.js) are removed.
-// `events` limits which template events are merged.
-// graphify may be installed at a full path; compare hook commands without it.
-const normalizeCommand = (command) => String(command).replace(/^"?[^"]*?graphify(\.exe)?"? hook-guard/i, "graphify hook-guard");
+// present are skipped, and the old workflow Stop hook (claude-verify.js) is removed. `events`
+// limits which template events are merged. With `owned` (the project's own file), hooks the
+// workflow added that no longer apply are removed too: graphify hook-guard entries (Codex
+// rejects the context they print; graph guidance reaches Codex through CODEX.md instead), and
+// template hooks of events not merged (the Codex-only SessionStart hook after a mode switch).
+const graphifyGuard = /graphify(\.exe)?"? hook-guard/i;
 
-function mergeHooks(file, step, { graphify, events } = {}) {
-  let template = fs.readFileSync(path.join(templates, "codex", "hooks.json"), "utf8");
-  if (graphify && graphify !== "graphify") template = template.replace(/"graphify hook-guard/g, `"${graphify} hook-guard`);
-  const wanted = JSON.parse(template);
+function mergeHooks(file, step, { events, owned } = {}) {
+  const wanted = JSON.parse(fs.readFileSync(path.join(templates, "codex", "hooks.json"), "utf8"));
   const text = readText(file);
   let config;
   try {
@@ -413,27 +438,31 @@ function mergeHooks(file, step, { graphify, events } = {}) {
     return record(step, false, "isn't valid JSON; merge templates/codex/hooks.json by hand");
   }
   config.hooks = config.hooks || {};
+  const dropped = owned ? Object.entries(wanted.hooks).filter(([event]) => events && !events.includes(event)).flatMap(([, groups]) => groups.flatMap(hookCommands)) : [];
   let legacy = 0;
+  let repaired = 0;
   for (const [event, groups] of Object.entries(config.hooks)) {
     if (!Array.isArray(groups)) continue;
     config.hooks[event] = groups.map((group) => {
       const hooks = (group.hooks || []).filter((hook) => {
-        const old = [hook.command, hook.commandWindows].some((command) => typeof command === "string" && command.includes("claude-verify.js"));
-        if (old) legacy++;
+        const commands = [hook.command, hook.commandWindows].filter((command) => typeof command === "string");
+        const stop = commands.some((command) => command.includes("claude-verify.js"));
+        const old = stop || (owned && commands.some((command) => graphifyGuard.test(command) || dropped.includes(command)));
+        if (stop) legacy++;
+        if (old) repaired++;
         return !old;
       });
       return hooks.length === (group.hooks || []).length ? group : { ...group, hooks };
     }).filter((group) => (group.hooks || []).length);
     if (!config.hooks[event].length && groups.length) delete config.hooks[event];
   }
-  const repaired = legacy;
   let added = 0;
   for (const [event, groups] of Object.entries(wanted.hooks)) {
     if (events && !events.includes(event)) continue;
     const existing = (config.hooks[event] = config.hooks[event] || []);
-    const present = new Set(existing.flatMap(hookCommands).map(normalizeCommand));
+    const present = new Set(existing.flatMap(hookCommands));
     for (const group of groups) {
-      if (hookCommands(group).every((command) => present.has(normalizeCommand(command)))) continue;
+      if (hookCommands(group).every((command) => present.has(command))) continue;
       existing.push(group);
       added++;
     }
@@ -454,38 +483,79 @@ function codexHome() {
 
 // The project's .codex/hooks.json when it's ours to change; a tracked one is only checked
 // (old Stop hook) and never edited. An existing user-level ~/.codex/hooks.json loses the old
-// Stop hook, if any.
-function mergeProjectHooks(root, graphify, label = "") {
+// Stop hook, if any. Only a Codex-only project gets the SessionStart hook that points Codex at
+// its rules (with Claude, the handoff message does); an existing project file just loses the
+// hooks earlier versions added.
+function mergeProjectHooks(root, mode) {
   const rel = ".codex/hooks.json";
   const userFile = path.join(codexHome(), "hooks.json");
-  if (fs.existsSync(userFile)) mergeHooks(userFile, `~/.codex/hooks.json${label}`, { events: [] });
+  if (fs.existsSync(userFile)) mergeHooks(userFile, "~/.codex/hooks.json", { events: [] });
+  const file = path.join(root, rel);
   const tracked = isTracked(root, rel);
-  mergeHooks(path.join(root, rel), `${rel}${label}`, { graphify, events: tracked ? [] : undefined });
+  if (mode === "codex" && !tracked) return mergeHooks(file, rel, { owned: true });
+  if (mode === "codex") record(`${rel} (rules hook)`, null, "tracked by git, so the SessionStart hook isn't added; start each Codex thread with: follow .codex/workflow/CODEX.md");
+  if (fs.existsSync(file)) mergeHooks(file, rel, { events: [], owned: true });
 }
 
-// Claude Code: a PostToolUse hook on ExitPlanMode that reminds Claude to confirm the role and
-// hand the plan off. settings.local.json is per-user, so teammates never see it. The hook runs
-// .codex/hooks/claude-plan-gate.js, so it is only wired up when that script is ours: a tracked
-// copy can't be updated by the plugin and may not be what the plugin ships.
-function mergeClaudeSettings(root) {
+// The graphify guard hooks `graphify claude install` would put in the shared .claude/settings.json:
+// before a search or raw read, Claude is nudged to query the graph first. graphify may live at a
+// full path; commands are compared without it.
+function graphifyGuards(graphify) {
+  const exe = !graphify ? "graphify" : / /.test(graphify) ? `"${graphify}"` : graphify;
+  return [
+    { matcher: "Bash|Grep", hooks: [{ type: "command", command: `${exe} hook-guard search` }] },
+    { matcher: "Read|Glob", hooks: [{ type: "command", command: `${exe} hook-guard read` }] },
+  ];
+}
+const guardKind = (command) => (graphifyGuard.test(command) ? String(command).replace(/^.*hook-guard\s+(\w+).*$/s, "$1") : "");
+
+// Claude Code: a PostToolUse hook on ExitPlanMode that reminds Claude how this plan is run, and
+// the graphify guards. settings.local.json is per-user, so teammates never see it. The plan hook
+// runs .codex/hooks/claude-plan-gate.js, so it is only wired up when that script is ours: a
+// tracked copy can't be updated by the plugin and may not be what the plugin ships. The guards
+// are skipped with --skip-graphify (sync remembers it), and when the shared .claude/settings.json already has
+// graphify's own.
+function mergeClaudeSettings(root, graphify, guards) {
   const rel = ".claude/settings.local.json";
   const file = path.join(root, rel);
-  if (isTracked(root, ".codex/hooks/claude-plan-gate.js")) {
-    return record(rel, null, ".codex/hooks/claude-plan-gate.js is tracked by git, so the plan handoff hook isn't added; ask Claude to confirm the implementer yourself");
-  }
-  const command = "node -e \"const p=require('path').join(process.env.CLAUDE_PROJECT_DIR||process.cwd(),'.codex','hooks','claude-plan-gate.js');require('fs').existsSync(p)?require(p):console.log('{}')\"";
   const text = readText(file);
   let config;
   try {
     config = text === null ? {} : JSON.parse(text);
   } catch {
-    return record(rel, false, "isn't valid JSON; add the ExitPlanMode hook by hand (see SKILL.md)");
+    return record(rel, false, "isn't valid JSON; add the ExitPlanMode and graphify hooks by hand (see SKILL.md)");
   }
   config.hooks = config.hooks || {};
-  const groups = (config.hooks.PostToolUse = config.hooks.PostToolUse || []);
-  if (groups.some((group) => hookCommands(group).includes(command))) return record(rel, true, "plan handoff hook present");
-  groups.push({ matcher: "ExitPlanMode", hooks: [{ type: "command", command }] });
-  write(file, JSON.stringify(config, null, 2) + "\n", rel, "added the ExitPlanMode handoff hook");
+  const added = [];
+  if (isTracked(root, ".codex/hooks/claude-plan-gate.js")) {
+    record(`${rel} (plan hook)`, null, ".codex/hooks/claude-plan-gate.js is tracked by git, so the plan handoff hook isn't added; ask Claude to confirm the implementer yourself");
+  } else {
+    const command = "node -e \"const p=require('path').join(process.env.CLAUDE_PROJECT_DIR||process.cwd(),'.codex','hooks','claude-plan-gate.js');require('fs').existsSync(p)?require(p):console.log('{}')\"";
+    const groups = (config.hooks.PostToolUse = config.hooks.PostToolUse || []);
+    if (!groups.some((group) => hookCommands(group).includes(command))) {
+      groups.push({ matcher: "ExitPlanMode", hooks: [{ type: "command", command }] });
+      added.push("the ExitPlanMode handoff hook");
+    }
+  }
+  if (guards && !graphifyGuard.test(readText(path.join(root, ".claude", "settings.json")) || "")) {
+    const pre = (config.hooks.PreToolUse = config.hooks.PreToolUse || []);
+    const present = new Set(pre.flatMap(hookCommands).map(guardKind));
+    let missing = graphifyGuards("").filter((group) => !present.has(guardKind(group.hooks[0].command)));
+    // Sync passes no graphify path; look it up only when a guard is actually missing.
+    const exe = missing.length ? graphify || findGraphify() : "";
+    if (missing.length && !exe) {
+      record(`${rel} (graphify)`, null, "graphify isn't installed, so its guard hooks aren't added");
+      missing = [];
+    }
+    missing = graphifyGuards(exe).filter((group) => missing.some((wanted) => wanted.matcher === group.matcher));
+    if (missing.length) {
+      pre.push(...missing);
+      added.push("the graphify guard hooks");
+    }
+    if (!pre.length) delete config.hooks.PreToolUse;
+  }
+  if (!added.length) return record(rel, true, "plan and graphify hooks present");
+  write(file, JSON.stringify(config, null, 2) + "\n", rel, `added ${added.join(" and ")}`);
 }
 
 function hookCommands(group) {
@@ -565,7 +635,7 @@ function readManifest(root) {
 function setupIntegrations(graphify) {
   if (flag("--skip-graphify")) record("graphify install", null, "skipped (--skip-graphify)");
   else if (!graphify && !dryRun) record("graphify install", false, "graphify isn't installed; re-run after installing it");
-  else record("graphify project install", null, "skipped: it edits shared CLAUDE.md/AGENTS.md. The graphify rules are in CLAUDE.local.md and .codex/workflow/CODEX.md, and its guard hooks in .codex/hooks.json");
+  else record("graphify project install", null, "skipped: it edits shared CLAUDE.md/AGENTS.md. The graphify rules are in the local workflow rules, and Claude's guard hooks in .claude/settings.local.json");
 }
 
 // Deletes files earlier versions installed and this one dropped, when they're still unedited.
@@ -587,40 +657,49 @@ function removeRetired(root, previous) {
   }
 }
 
-function setupProject(root, graphify) {
+function setupProject(root, graphify, mode) {
   projectDir = root;
-  if (!sync) console.log(`\nProject: ${root} (local only: no tracked file is changed)`);
+  if (!sync) console.log(`\nProject: ${root} (${mode === "dual" ? "Claude + Codex" : `${mode} only`}; local only: no tracked file is changed)`);
   const previous = readManifest(root) || {};
+  // graphify guard hooks for Claude: --skip-graphify opts out, and sync remembers that.
+  const guards = sync ? previous.guards !== false : !flag("--skip-graphify");
   if (typeof previous.version === "string" && compareVersions(previous.version, pluginVersion) > 0) {
     return record("project", false, `already uses workflow v${previous.version}, newer than this plugin (v${pluginVersion}); update the plugin instead of downgrading the project`);
   }
-  const ownedPaths = [...OWNED.map((file) => `.${file}`), CODEX_RULES];
+  const render = (from) => lib.forMode(fs.readFileSync(path.join(templates, from), "utf8"), mode);
+  // A Claude-only project has no Codex rules; an earlier copy is removed as a stale file.
+  const ownedPaths = [...OWNED.map((file) => `.${file}`), ...(mode === "claude" ? [] : [CODEX_RULES])];
   for (const file of OWNED) copyOwned(root, file, `.${file}`);
-  const codexRules = fs.readFileSync(path.join(templates, "AGENTS.codex.md"), "utf8");
-  writeOwned(root, `# Codex rules for the Claude + Codex workflow\n\n${codexRules.replace(/<!--[\s\S]*?-->\s*/, "")}`, CODEX_RULES);
+  if (mode !== "claude") {
+    const title = mode === "codex" ? "Codex rules for the Codex-only workflow" : "Codex rules for the Claude + Codex workflow";
+    writeOwned(root, `# ${title}\n\n${render("AGENTS.codex.md")}`, CODEX_RULES);
+  }
   removeStale(root, previous, ownedPaths);
   removeRetired(root, previous);
   const managed = {};
   for (const [from, to] of MANAGED) {
-    copyManaged(root, from, to, previous.managed || {});
+    const source = render(from);
+    copyManaged(root, source, to, previous.managed || {});
     // Record a hash only for text this plugin wrote; a customized file keeps the old hash, so it never matches.
     const text = readText(path.join(root, to));
-    if (text !== null && text === fs.readFileSync(path.join(templates, from), "utf8")) managed[to] = sha(text);
+    if (text !== null && text === source) managed[to] = sha(text);
     else if (previous.managed?.[to]) managed[to] = previous.managed[to];
   }
   if (!sync) migrateOldLayout(root);
 
-  const claudeSection = fs.readFileSync(path.join(templates, "CLAUDE.workflow.md"), "utf8");
-  mergeSection(root, "CLAUDE.local.md", claudeSection, "## Workflow");
-  mergeClaudeSettings(root);
-  mergeProjectHooks(root, graphify);
+  // A Codex-only project has no Claude: its CLAUDE.local.md and settings are left as they are.
+  if (mode !== "codex") {
+    mergeSection(root, "CLAUDE.local.md", render("CLAUDE.workflow.md"), "## Workflow");
+    mergeClaudeSettings(root, graphify, guards);
+  }
+  mergeProjectHooks(root, mode);
   updateExclude(root);
 
   // Sync is files only: graphify is left as it is.
   if (!sync) setupIntegrations(graphify);
 
   if (!dryRun && results.every((r) => r.ok !== false)) {
-    const manifest = { version: pluginVersion, files: ownedPaths, managed };
+    const manifest = { version: pluginVersion, mode, ...(guards ? {} : { guards: false }), files: ownedPaths, managed };
     const text = JSON.stringify(manifest, null, 2) + "\n";
     if (readText(path.join(root, MANIFEST)) !== text) write(path.join(root, MANIFEST), text, MANIFEST, `workflow v${pluginVersion}`);
   }
@@ -646,6 +725,15 @@ function mainWorktree(root) {
   return main && path.resolve(root) !== main ? main : "";
 }
 
+// The mode a run uses: the flag, else the one the project (or, for a linked worktree, its main
+// worktree) was set up with, else both agents.
+function projectMode(root, manifest) {
+  if (modeFlag) return modeFlag;
+  const main = !manifest && root ? mainWorktree(root) : "";
+  const recorded = (manifest || (root && readManifest(root)) || (main && readManifest(main)) || {}).mode;
+  return ["claude", "codex"].includes(recorded) ? recorded : "dual";
+}
+
 // Files-only upgrade for a project that already uses the workflow. Silent when there is
 // nothing to do, and never fails the session it runs in.
 // Never writes a tracked file, never runs tools or installers, never takes a project set up
@@ -665,7 +753,7 @@ function syncProject() {
     const main = mainWorktree(root);
     const mainManifest = main ? readManifest(main) : null;
     if (mainManifest && mainManifest.shared !== true) {
-      setupProject(root, "");
+      setupProject(root, "", projectMode(root, mainManifest));
       return;
     }
     if (readText(path.join(root, ".codex", "autopilot.js")) !== null) {
@@ -680,7 +768,7 @@ function syncProject() {
     notices.push("this project used the shared layout, which is no longer supported. Run /dual-agent-workflow:setup --project-only to move it to local files; it will point out the old sections in tracked files for your team to remove.");
     return;
   }
-  setupProject(root, "");
+  setupProject(root, "", projectMode(root, manifest));
 }
 
 function announceChanges() {
@@ -695,6 +783,46 @@ function announceChanges() {
   for (const r of results.filter((r) => r.ok === false)) console.log(`dual-agent-workflow sync: ${r.step}: ${r.note}`);
 }
 
+function leftForYou(mode) {
+  const checks = `If the detected checks above are wrong or empty, add .codex/verify.json. For UI work, add its
+     "ui" block (startCommand, url, viewports) so ${mode === "codex" ? "Codex" : "Claude"} can audit the app with Playwright.`;
+  if (mode === "claude") {
+    return [
+      "Build the first graph: /graphify . in Claude Code (needs some code first).",
+      checks,
+      `Restart Claude Code (it loads CLAUDE.local.md, the plan and graphify hooks and the ponytail,
+     taste-skill and caveman plugins) and check /mcp for playwright and playwright-headed.
+Then plan a task with Claude: it implements every plan itself, checks each phase and asks you
+before every commit.`,
+    ];
+  }
+  if (mode === "codex") {
+    return [
+      "Open the project in Codex and trust the workflow hooks (Codex asks on first run, or use /hooks).",
+      `Verify and review run read-only codex exec calls. Let those commands use the network and a long
+     timeout (30 min); approve them when Codex asks to run outside the sandbox.`,
+      "Build the first graph: graphify update . in a terminal (needs some code first).",
+      checks,
+      `Restart Codex and start a new thread (it loads .codex/workflow/CODEX.md through the SessionStart
+     hook, and the ponytail, taste-skill and caveman plugins); check /mcp for playwright and playwright-headed.
+Then describe a task to Codex: it plans, asks you to approve the plan, builds and checks each
+phase, and asks you before every commit.`,
+    ];
+  }
+  return [
+    "Open the project in Codex and trust the workflow hooks (Codex asks on first run, or use /hooks).",
+    `Codex runs the verify step (headless Claude) from its own session. Let those commands use the
+     network and a long timeout (30 min); approve them when Codex asks to run outside the sandbox.`,
+    "Build the first graph: /graphify . in Claude Code (needs some code first).",
+    checks,
+    `Restart Claude Code (it loads CLAUDE.local.md, the plan and graphify hooks and the ponytail,
+     taste-skill and caveman plugins) and check /mcp for playwright and playwright-headed. In Codex,
+     trust the plugin hooks (/hooks) and start a new thread.
+Then keep a Codex session open in this repo and plan a task with Claude. Claude routes it by
+task type; for Codex it sends the plan to that session itself and reviews the result.`,
+  ];
+}
+
 async function main() {
   if (sync) {
     try {
@@ -705,38 +833,30 @@ async function main() {
     }
     return;
   }
+  if (flag("--claude-only") && flag("--codex-only")) {
+    console.error("Choose one: --claude-only or --codex-only (neither sets up both agents).");
+    process.exitCode = 1;
+    return;
+  }
   const doTools = !flag("--project-only");
   const doProject = !flag("--tools-only");
   if (dryRun) console.log("Dry run: nothing is installed or written.");
 
-  const graphify = doTools ? await installTools() : findGraphify();
+  const root = projectRoot();
+  const mode = projectMode(root);
+  const graphify = doTools ? await installTools(mode) : findGraphify();
   if (doProject) {
-    const root = projectRoot();
     if (!root) {
       record("project", false, "not inside a git repository; run `git init` first, or pass --root <dir>");
     } else {
-      setupProject(root, graphify);
+      setupProject(root, graphify, mode);
     }
   }
 
   const failed = results.filter((r) => r.ok === false);
   console.log(`\n${failed.length ? `${failed.length} step(s) need attention:` : "All steps succeeded."}`);
   for (const r of failed) console.log(`  - ${r.step}: ${r.note}`);
-  if (doProject) {
-    console.log(`
-Left for you:
-  1. Open the project in Codex and trust the workflow hooks (Codex asks on first run, or use /hooks).
-  2. Codex runs the verify step (headless Claude) from its own session. Let those commands use the
-     network and a long timeout (30 min); approve them when Codex asks to run outside the sandbox.
-  3. Build the first graph: /graphify . in Claude Code (needs some code first).
-  4. If the detected checks above are wrong or empty, add .codex/verify.json. For UI work, add its
-     "ui" block (startCommand, url, viewports) so Claude can audit the app with Playwright.
-  5. Restart Claude Code (it loads CLAUDE.local.md, the plan hook and the ponytail and taste-skill
-     plugins) and check /mcp for playwright and playwright-headed. In Codex, trust the plugin
-     hooks (/hooks) and start a new thread.
-Then keep a Codex session open in this repo and plan a task with Claude. Claude asks who
-implements it; for Codex it sends the plan to that session itself and reviews the result.`);
-  }
+  if (doProject) console.log(`\nLeft for you:\n${leftForYou(mode).map((step, i) => `  ${i + 1}. ${step}`).join("\n")}`);
   process.exitCode = failed.length ? 1 : 0;
 }
 

@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const installer = path.join(__dirname, "..", "skills", "claude-codex-workflow", "scripts", "install.js");
+const installer = path.join(__dirname, "..", "skills", "dual-agent-workflow", "scripts", "install.js");
 const plain = ["--project-only", "--skip-graphify"];
 const pluginVersion = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).version;
 
@@ -233,6 +233,27 @@ test("sync sets up a linked git worktree from the main worktree's manifest", () 
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(wt, ".codex", "workflow-manifest.json"), "utf8")).version, pluginVersion);
   assert.strictEqual(gitStatus(wt), "");
   assert.strictEqual(installerRun(wt, ["--sync"]).stdout, "");
+});
+
+test("sync keeps a single-agent mode, in the project and in its linked worktrees", () => {
+  const dir = tempProject();
+  assert.strictEqual(installerRun(dir, [...plain, "--codex-only"]).status, 0);
+  editManifest(dir, (manifest) => {
+    manifest.version = "1.0.0";
+  });
+  fs.writeFileSync(path.join(dir, ".codex", "autopilot.js"), "// STALE-MARKER\n");
+  let result = installerRun(dir, ["--sync"]);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(JSON.parse(read(dir, ".codex/workflow-manifest.json")).mode, "codex");
+  assert.match(read(dir, ".codex/workflow/CODEX.md"), /This project uses Codex alone/);
+
+  git(dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init");
+  const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+  assert.strictEqual(git(dir, "worktree", "add", "-q", wt, "-b", "feature").status, 0);
+  result = installerRun(wt, ["--sync"]);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(wt, ".codex", "workflow-manifest.json"), "utf8")).mode, "codex");
+  assert.ok(!fs.existsSync(path.join(wt, "CLAUDE.local.md")));
 });
 
 test("a worktree of a repo that doesn't use the workflow is left alone", () => {

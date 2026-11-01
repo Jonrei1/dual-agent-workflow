@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 
-const skill = path.join(__dirname, "..", "skills", "claude-codex-workflow");
+const skill = path.join(__dirname, "..", "skills", "dual-agent-workflow");
 const installer = path.join(skill, "scripts", "install.js");
 const lib = require(path.join(skill, "templates", "codex", "hooks", "workflow-lib"));
 const isWindows = process.platform === "win32";
@@ -87,23 +87,121 @@ test("setup in a team repo changes no tracked file and leaves git status clean",
   assert.strictEqual(git(dir, "status", "--porcelain", "--untracked-files=all"), "");
 });
 
-test("setup in a fresh repo creates and hides its own .codex/hooks.json", () => {
+test("setup in a fresh repo writes no Codex hooks file unless Codex works alone", () => {
   const dir = gitRepo();
   const result = install(dir);
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
   assert.match(read(dir, ".git/info/exclude"), /^\.codex\/hooks\.json$/m);
-  const hooks = JSON.parse(read(dir, ".codex/hooks.json"));
-  assert.ok(!hooks.hooks.Stop && hooks.hooks.PreToolUse);
+  assert.ok(!fs.existsSync(path.join(dir, ".codex/hooks.json")), "with Claude, the handoff message points Codex at its rules");
   assert.strictEqual(git(dir, "status", "--porcelain", "--untracked-files=all"), "");
   assert.ok(!fs.existsSync(path.join(dir, ".gitignore")));
   assert.ok(!fs.existsSync(path.join(dir, "CLAUDE.md")));
+});
+
+// ---- single-agent modes ----
+
+const manifestMode = (dir) => JSON.parse(read(dir, ".codex/workflow-manifest.json")).mode;
+
+test("--claude-only sets up Claude alone: no Codex rules or hooks, and Claude builds everything", () => {
+  const dir = gitRepo();
+  const result = install(dir, ["--claude-only"]);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(manifestMode(dir), "claude");
+  const rules = read(dir, "CLAUDE.local.md");
+  assert.match(rules, /Claude builds everything: backend, functions, scraping and every frontend/);
+  assert.match(rules, /at most 1 Explore subagent/);
+  assert.match(rules, /caveman/);
+  assert.doesNotMatch(rules, /handoff|autopilot\.js review|<!-- only|Codex implements/);
+  assert.ok(!fs.existsSync(path.join(dir, ".codex/workflow/CODEX.md")));
+  assert.ok(!fs.existsSync(path.join(dir, ".codex/hooks.json")));
+  assert.strictEqual(JSON.parse(read(dir, ".claude/settings.local.json")).hooks.PostToolUse[0].matcher, "ExitPlanMode");
+  assert.doesNotMatch(read(dir, ".codex/plans/_template.md"), /<!-- only/);
+  const gate = spawnSync(process.execPath, [path.join(dir, ".codex/hooks/claude-plan-gate.js")], { input: "{}", encoding: "utf8" });
+  assert.match(JSON.parse(gate.stdout).hookSpecificOutput.additionalContext, /This project has no Codex/);
+  assert.strictEqual(git(dir, "status", "--porcelain", "--untracked-files=all"), "");
+});
+
+test("--codex-only sets up Codex alone, keeps the mode on re-runs, and switching drops the other agent's rules", () => {
+  const dir = gitRepo();
+  let result = install(dir, ["--codex-only"]);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(manifestMode(dir), "codex");
+  assert.ok(!fs.existsSync(path.join(dir, "CLAUDE.local.md")));
+  assert.ok(!fs.existsSync(path.join(dir, ".claude/settings.local.json")));
+  const rules = read(dir, ".codex/workflow/CODEX.md");
+  assert.match(rules, /^# Codex rules for the Codex-only workflow/);
+  assert.match(rules, /This project uses Codex alone/);
+  assert.match(rules, /wait for the user's explicit approval/);
+  assert.doesNotMatch(rules, /Never run git commit|Claude builds every frontend|<!-- only/);
+  const session = JSON.parse(read(dir, ".codex/hooks.json")).hooks.SessionStart[0].hooks[0].command;
+  assert.match(spawnSync(session, { shell: true, encoding: "utf8" }).stdout, /"additionalContext":"[^"]*\.codex\/workflow\/CODEX\.md/);
+  assert.doesNotMatch(read(dir, ".codex/plans/_template.md"), /Frontend \(Claude\)/);
+  assert.match(result.stdout, /Then describe a task to Codex/);
+
+  result = install(dir);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(manifestMode(dir), "codex", "a run without a mode flag keeps the project's mode");
+  assert.ok(!fs.existsSync(path.join(dir, "CLAUDE.local.md")));
+
+  result = install(dir, ["--claude-only"]);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(manifestMode(dir), "claude");
+  assert.ok(!fs.existsSync(path.join(dir, ".codex/workflow/CODEX.md")), "the Codex rules are removed");
+  assert.match(read(dir, "CLAUDE.local.md"), /^## Workflow/m);
+  assert.ok(!JSON.parse(read(dir, ".codex/hooks.json")).hooks.SessionStart, "the Codex rules hook is removed");
+  assert.match(read(dir, ".codex/plans/_template.md"), /Frontend \(Claude\)/, "an unedited plan template follows the mode");
+});
+
+test("--claude-only and --codex-only together are refused", () => {
+  const dir = gitRepo();
+  const result = install(dir, ["--claude-only", "--codex-only"]);
+  assert.strictEqual(result.status, 1);
+  assert.match(result.stderr, /Choose one/);
+  assert.ok(!fs.existsSync(path.join(dir, ".codex")));
+});
+
+test("graphify guard hooks go to Claude's local settings, unless the shared settings already have them", () => {
+  const dir = gitRepo();
+  const bin = tempDir("ccw-graphify-");
+  const script = path.join(bin, "graphify.js");
+  fs.writeFileSync(script, "console.log('graphify test');\n");
+  if (isWindows) fs.writeFileSync(path.join(bin, "graphify.cmd"), `@"${process.execPath}" "${script}" %*\r\n`);
+  else {
+    fs.writeFileSync(path.join(bin, "graphify"), `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    fs.chmodSync(path.join(bin, "graphify"), 0o755);
+  }
+  const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+  const run = (extra = []) => spawnSync(process.execPath, [installer, "--project-only", "--root", dir, ...extra], { encoding: "utf8", env: { ...process.env, CODEX_HOME: path.join(dir, "..", `${path.basename(dir)}-codex-home`), ...env } });
+  let result = run();
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  const pre = JSON.parse(read(dir, ".claude/settings.local.json")).hooks.PreToolUse;
+  assert.deepStrictEqual(pre.map((group) => [group.matcher, group.hooks[0].command]), [["Bash|Grep", "graphify hook-guard search"], ["Read|Glob", "graphify hook-guard read"]]);
+  const before = read(dir, ".claude/settings.local.json");
+  assert.strictEqual(run().status, 0);
+  assert.strictEqual(read(dir, ".claude/settings.local.json"), before, "re-running adds nothing");
+
+  const other = gitRepo();
+  write(other, ".claude/settings.json", JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Read|Glob", hooks: [{ type: "command", command: "C:/py/graphify.exe hook-guard read" }] }] } }));
+  result = spawnSync(process.execPath, [installer, "--project-only", "--root", other], { encoding: "utf8", env: { ...process.env, ...env } });
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.ok(!JSON.parse(read(other, ".claude/settings.local.json")).hooks.PreToolUse);
+});
+
+test("a Codex-only plan may build the frontend inside its phases", () => {
+  const dir = planRepo(goodPlan);
+  write(dir, ".codex/workflow-manifest.json", JSON.stringify({ mode: "codex" }));
+  const text = goodPlan.replace(/## Frontend \(Claude\)[\s\S]*?(?=## Phase 1)/, "").replace("**Scope:** src/api/index.js", "**Scope:** src/components/Badge.jsx").replace("**Covers:** A2\n**Done when:** the endpoint", "**Covers:** A1, A2\n**Done when:** the endpoint");
+  assert.deepStrictEqual(lib.planChecklist(dir, "add-badge", text).filter((item) => !item.ok), []);
+  fs.rmSync(path.join(dir, ".codex/workflow-manifest.json"));
+  assert.ok(lib.planChecklist(dir, "add-badge", text).some((item) => !item.ok && /backend only/.test(item.item)), "with Claude, the same plan is rejected");
 });
 
 test("upgrade removes workflow hooks from project and user files, preserving other hooks", () => {
   const dir = gitRepo();
   const other = { type: "command", command: "echo unrelated" };
   const old = { type: "command", command: "node .codex/hooks/claude-verify.js" };
-  const config = { hooks: { Stop: [{ matcher: "*", hooks: [old, other] }, { hooks: [{ ...old, command: "old launcher", commandWindows: old.command }] }] } };
+  const guard = { matcher: "Bash|Grep", hooks: [{ type: "command", command: "\"C:/py dir/graphify.exe\" hook-guard search" }] };
+  const config = { hooks: { Stop: [{ matcher: "*", hooks: [old, other] }, { hooks: [{ ...old, command: "old launcher", commandWindows: old.command }] }], PreToolUse: [guard] } };
   write(dir, ".codex/hooks.json", JSON.stringify(config));
   const userFile = path.join(dir, "..", `${path.basename(dir)}-codex-home`, "hooks.json");
   fs.mkdirSync(path.dirname(userFile), { recursive: true });
@@ -114,8 +212,8 @@ test("upgrade removes workflow hooks from project and user files, preserving oth
     const hooks = JSON.parse(fs.readFileSync(file, "utf8")).hooks;
     assert.deepStrictEqual(hooks.Stop, [{ matcher: "*", hooks: [other] }]);
   }
-  assert.ok(JSON.parse(read(dir, ".codex/hooks.json")).hooks.PreToolUse, "an untracked project file gets the graphify hooks");
-  assert.ok(!JSON.parse(fs.readFileSync(userFile, "utf8")).hooks.PreToolUse, "the user file only loses the old hook");
+  assert.ok(!JSON.parse(read(dir, ".codex/hooks.json")).hooks.PreToolUse, "the project file loses the graphify guard Codex can't use");
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(userFile, "utf8")).hooks.PreToolUse, [guard], "the user file only loses the old Stop hook");
   const before = read(dir, ".codex/hooks.json");
   assert.strictEqual(install(dir).status, 0);
   assert.strictEqual(read(dir, ".codex/hooks.json"), before);
@@ -715,6 +813,51 @@ test("non-UI begin to close makes one alignment call and no summary call", () =>
   assert.ok(!fs.existsSync(path.join(dir, ".codex/tasks")));
 });
 
+
+test("Codex-only: phases pass on gates, and one read-only codex exec reviews the whole task on the last phase", () => {
+  const dir = gateRepo("");
+  editManifestMode(dir, "codex");
+  write(dir, ".codex/plans/fix-label.md", gatePlan.replace("**Done when:** the label reads right.", "**Done when:** the label reads right.\n**Hands off:** src/label.js exports the label.") + `
+## Phase 2: Caption
+**Scope:** src/caption.js
+**Steps:**
+1. Add the caption.
+**Covers:** A1
+**Done when:** the caption exists.
+**Gate (must pass):**
+- \`node gate.js\`
+`);
+  const claude = fakeClaude();
+  const alignment = { done: [{ item: "A1", evidence: "src/label.js:1" }], partial: [], missing: [], outOfScope: [], handsOff: [], must: [], unneeded: [], risks: [], verdict: "PASS" };
+  const codex = fakeCodex({ review: alignment });
+  const env = { PATH: `${codex.env.PATH.split(path.delimiter)[0]}${path.delimiter}${claude.env.PATH}` };
+  assert.strictEqual(step(dir, ["begin"], env).status, 0);
+  assert.strictEqual(step(dir, ["phase", "1"], env).status, 0);
+  write(dir, "src/label.js", "module.exports = 'right';\n");
+  let result = step(dir, ["verify", "1"], env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /alignment review runs once, on the last phase/);
+  assert.ok(!fs.existsSync(codex.argsFile), "no model call before the last phase");
+  assert.strictEqual(step(dir, ["phase", "2"], env).status, 0);
+  write(dir, "src/caption.js", "module.exports = 'caption';\n");
+  result = step(dir, ["verify", "2"], env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  const args = JSON.parse(fs.readFileSync(codex.argsFile, "utf8"));
+  assert.strictEqual(args[0], "exec");
+  assert.strictEqual(args[args.indexOf("--sandbox") + 1], "read-only");
+  assert.deepStrictEqual(claude.calls(), [], "no Claude call in a Codex-only project");
+  const diff = read(dir, ".codex/verify/fix-label/phase-2.diff");
+  assert.match(diff, /src\/label\.js/, "the review covers the whole task");
+  assert.match(diff, /src\/caption\.js/);
+  const status = JSON.parse(read(dir, ".codex/autopilot/status.json"));
+  assert.strictEqual(status.phases["1"].alignment, "deferred");
+  assert.strictEqual(status.phases["2"].verdict, "PASS");
+});
+
+function editManifestMode(dir, mode) {
+  const file = path.join(dir, ".codex", "workflow-manifest.json");
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), mode }));
+}
 
 // ---- headed or headless browser ----
 

@@ -1,10 +1,10 @@
 {
   "name": "dual-agent-workflow",
-  "version": "4.1.0",
-  "description": "Claude + Codex as one team: Claude plans, reviews and builds every frontend; Codex builds the backend, functions and web scraping, routed by task type; local scripts gate and verify every phase, and Claude audits its UI with Playwright (headless, or headed so you can watch). Installs Claude Code, Codex CLI, Playwright, graphify and the ponytail and taste-skill plugins. Local only: never edits tracked files; plugin updates sync projects automatically.",
+  "version": "4.2.0",
+  "description": "Claude + Codex as one team, or either one alone (--claude-only, --codex-only): Claude plans, reviews and builds every frontend; Codex builds the backend, functions and web scraping, routed by task type; local scripts gate and verify every phase, and the frontend agent audits its UI with Playwright (headless, or headed so you can watch). Single-agent modes spend fewer tokens: one review per task, rules only for the agent in use. Installs Claude Code and/or Codex CLI, Playwright, graphify (skill and guard hooks) and the ponytail, taste-skill and caveman plugins. Local only: never edits tracked files; plugin updates sync projects automatically.",
   "author": {
     "name": "Jonrei",
     "url": "https://github.com/Jonrei1"
   },
-  "repository": "https://github.com/Jonrei1/Claude-Codex-Workflow"
+  "repository": "https://github.com/Jonrei1/dual-agent-workflow"
 }

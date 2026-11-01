@@ -8,7 +8,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const lib = require(path.join(__dirname, "..", "..", "skills", "claude-codex-workflow", "templates", "codex", "hooks", "workflow-lib"));
+const lib = require(path.join(__dirname, "..", "..", "skills", "dual-agent-workflow", "templates", "codex", "hooks", "workflow-lib"));
 
 const [configFile, ...args] = process.argv.slice(2);
 const config = JSON.parse(fs.readFileSync(configFile, "utf8"));

@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/claude-codex-workflow/scripts/install.js\" --sync",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/dual-agent-workflow/scripts/install.js\" --sync",
             "timeout": 30
           }
         ]

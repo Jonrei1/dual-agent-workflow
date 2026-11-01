@@ -1,11 +1,15 @@
 ---
-description: Install the tools (Claude Code, Codex CLI, Playwright, graphify, ponytail, taste-skill) and set up the Claude + Codex workflow in this project, as local files only (tracked files are never edited).
-argument-hint: "[--yes] [--dry-run] [--tools-only|--project-only] [--graphify-scope=user|global] [--skip-graphify] [--skip-playwright] [--skip-skills] [--root <dir>]"
+description: Install the tools (Claude Code, Codex CLI, Playwright, graphify, ponytail, taste-skill, caveman) and set up the Claude + Codex workflow, or a Claude-only or Codex-only version, in this project, as local files only (tracked files are never edited).
+argument-hint: "[--yes] [--dry-run] [--claude-only|--codex-only] [--tools-only|--project-only] [--graphify-scope=user|global] [--skip-graphify] [--skip-playwright] [--skip-skills] [--root <dir>]"
 allowed-tools: Bash(node:*), Bash(git status:*), Read, Write, Edit, AskUserQuestion
 ---
 
 Set up the Claude + Codex workflow in the current project.
 
+0. **Pick the mode.** If `$ARGUMENTS` has neither `--claude-only` nor `--codex-only` and the
+   project has no `.codex/workflow-manifest.json`, ask with AskUserQuestion which agents the
+   user has: both (default), only Claude (add `--claude-only`) or only Codex (add
+   `--codex-only`). A set-up project keeps its mode unless a flag changes it.
 1. **Check graphify.** Run `graphify --version`.
    - If it isn't installed, and `$ARGUMENTS` has no `--graphify-scope`, ask with AskUserQuestion
      where to install it:
@@ -15,7 +19,7 @@ Set up the Claude + Codex workflow in the current project.
 2. From the project root, run:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/skills/claude-codex-workflow/scripts/install.js" $ARGUMENTS <the graphify-scope flag from step 1>
+   node "${CLAUDE_PLUGIN_ROOT}/skills/dual-agent-workflow/scripts/install.js" $ARGUMENTS <the mode flag from step 0> <the graphify-scope flag from step 1>
    ```
 
    The installer can't prompt from here. If it reports tools as missing and the user
@@ -48,8 +52,11 @@ Set up the Claude + Codex workflow in the current project.
      Claude twice: `playwright` (headless) and `playwright-headed` (a visible window). Claude
      builds every frontend itself and audits it with one of them; it asks which for every UI plan. Backend, function and scraping work is routed to Codex automatically. Existing registrations are kept. Restart Claude
      and check `/mcp`.
-   - ponytail (senior dev and QA) and taste-skill (UI/UX) are installed as user-scope plugins
-     for Claude and Codex. `--skip-skills` opts out.
+   - ponytail (senior dev and QA), taste-skill (UI/UX) and caveman (terse replies) are
+     installed as user-scope plugins for each agent in use, and graphify's skill per agent.
+     `--skip-skills` and `--skip-graphify` opt out.
+   - In `--codex-only`, Playwright is registered for Codex instead, and Codex must trust the
+     SessionStart hook that loads its rules (`/hooks`).
    - `--project-only` skips both; `--skip-playwright` opts out of Playwright explicitly.
 
 Don't commit anything.

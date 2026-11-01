@@ -1,8 +1,15 @@
 ## Workflow
 
+<!-- only:dual -->
 Plans, reports, summaries and rules are local: .codex/plans/, .codex/verify/, .codex/tasks/,
 CLAUDE.local.md and .codex/workflow/CODEX.md are hidden through .git/info/exclude.
+<!-- /only -->
+<!-- only:claude -->
+Plans, reports, summaries and rules are local: .codex/plans/, .codex/verify/, .codex/tasks/ and
+CLAUDE.local.md are hidden through .git/info/exclude.
+<!-- /only -->
 Never add them to git or .gitignore. Claude prepares each passing phase for a commit and always asks approval before git commit; never stash or push.
+<!-- only:dual -->
 One run per clone/worktree. Before editing or handing off, record HEAD and staged/unstaged changes in .codex/tasks/<slug>-base.md.
 
 ### Roles
@@ -14,7 +21,22 @@ Smallest change first (ponytail, when installed: /ponytail): reuse what exists, 
 dependency, option or abstraction the task doesn't need, and plan the fewest phases that keep
 each diff reviewable (one is fine). Explore only what the task needs: graphify query first, and
 at most 2 Explore subagents with model: "haiku", only when the work spans many files.
+<!-- /only -->
+<!-- only:claude -->
+One task per clone/worktree. Before editing, record HEAD and staged/unstaged changes in .codex/tasks/<slug>-base.md.
 
+### Roles and token budget
+**Claude builds everything: backend, functions, scraping and every frontend.** This project uses no
+Codex; never hand work off. Smallest change first (ponytail, when installed: /ponytail): reuse
+what exists, add no dependency, option or abstraction the task doesn't need, and plan the fewest
+phases that keep each diff reviewable (one is fine).
+You carry the whole task alone, so spend tokens carefully: graphify query, path or explain before
+reading raw files; read only the files a phase touches; at most 1 Explore subagent with model:
+"haiku", only when the work spans many files; no subagent for what a few tool calls answer.
+Reply in caveman mode when installed (/caveman); code, commits, plans, reports and summaries stay normal prose.
+<!-- /only -->
+
+<!-- only:dual -->
 ### Plan and handoff
 - Route every new plan that changes app code by task type, without asking, and tell the user the route in one line: backend, function or scraping work means **Codex implements (Claude orchestrates)**; UI-only work means **Claude implements**; mixed work means Codex builds the non-UI phases and Claude the frontend after.
   Ask with AskUserQuestion only when the type is unclear or the user wants **Claude implements** or **Codex, manual phases**; the choice holds for this plan only. Skip read-only questions and doc/config-only edits.
@@ -52,23 +74,60 @@ at most 2 Explore subagents with model: "haiku", only when the work spans many f
 - During Codex execution, new check failures and alignment findings go back to Codex within scope; after completion, propose a rework plan for backend problems and ask before handoff. The helper updates the graph at close; after direct code edits run graphify update . once.
 
 ### Phase checkpoints (Claude only)
+<!-- /only -->
+<!-- only:claude -->
+### Plan and build
+- Plan every change to app code in plan mode, with the fewest phases; each phase names its files,
+  steps, a gate command and when it is done. Skip planning for read-only questions and doc/config-only edits.
+- For ui: yes, ask "Watch the browser (headed) or run headless?" and note the answer in the plan;
+  ask it again before any UI check you run outside a plan.
+- risk: high (schema, auth, payments, cross-layer contracts): have one Plan subagent review the
+  plan before you start. Otherwise there is no separate plan review.
+- For each phase: edit, run its gate and the project checks (`node .codex/hooks/claude-verify.js --print-checks`
+  lists them), fix new failures, then request commit approval using the checkpoint rules below.
+  There is no headless review per phase.
+- After the last phase, run one QA pass over the entire diff from recorded task-base HEAD
+  through the working tree (including committed phases), using /ponytail-review when installed. Fix mechanical Must findings and commit them separately after approval;
+  report Should and Nice findings without acting on them. Then run graphify update . once.
+- Write .codex/tasks/<YYYY-MM-DD>-<slug>.md from the template below (25 lines max), using the actual diff for deviations; report shipped work, verdicts, baseline failures and follow-ups.
+  Record unfinished work as such instead of claiming the task passed.
+
+### Phase checkpoints
+<!-- /only -->
 - Before every git commit (phase, frontend, QA fix or retry), show the files, diff summary and proposed message; ask with AskUserQuestion and wait for explicit approval. Prior approval never covers another commit.
 - Checks and review must pass first; document baseline failures. Never commit failed or unfinished phases. Stage only phase paths, never git add . or -A; preserve unrelated staged/unstaged work.
 - Use git commit --only -m "<message>" -- <explicit phase paths>; if a file also contains pre-existing user changes, stop and explain.
   Never reset or discard user work. Never include unrelated staged hunks, local workflow files or secrets.
 - Use Suggested commit or `<type>(<slug>): phase <N> - <title>`; skip empty commits. Record each SHA (or no changes).
+<!-- only:dual -->
 - Rejected or pending approval, or a failed commit, blocks the next handoff; never bypass hooks or treat silence as approval. Commit reviewed QA fixes separately. Final summaries list the base HEAD and all checkpoint SHAs for backtracking.
+<!-- /only -->
+<!-- only:claude -->
+- Rejected or pending approval, or a failed commit, blocks the next phase; never bypass hooks or treat silence as approval. Final summaries list the base HEAD and all checkpoint SHAs for backtracking.
+<!-- /only -->
 
 ### Frontend (ui: yes, and any UI task you implement)
 Build it yourself, once, as the finished design: components, styles, states, copy and
+<!-- only:dual -->
 accessibility, wired to the API from the last Hands off. Use taste-skill when installed:
 redesign-existing-projects for app screens, design-taste-frontend for new public pages.
 Bounds: only what `## Frontend (Claude)` lists; no new dependency, design system or image
+<!-- /only -->
+<!-- only:claude -->
+accessibility, wired to the API the earlier phases built. Use taste-skill when installed:
+redesign-existing-projects for app screens, design-taste-frontend for new public pages.
+Bounds: only what the plan lists; no new dependency, design system or image
+<!-- /only -->
 sourcing unless the plan asks. Then audit your own work once with Playwright against `## UI
 audit`: start the app with its Start command (stop it after), use the server the user chose
 (mcp__playwright-headed__* to watch, mcp__playwright__* headless), and at each viewport check
 every item plus layout breaks, overflow, console errors, failed requests and unlabeled controls.
+<!-- only:dual -->
 Fix what fails (frontend files only; a backend defect goes to Codex in a rework plan), re-check,
+<!-- /only -->
+<!-- only:claude -->
+Fix what fails, re-check,
+<!-- /only -->
 run the project checks, and write .codex/verify/<slug>/final-ui-audit.md (PASS/FAIL per item,
 screenshots, then `UI AUDIT: PASS | NEEDS REWORK | BLOCKED`).
 
@@ -78,7 +137,12 @@ screenshots, then `UI AUDIT: PASS | NEEDS REWORK | BLOCKED`).
 
 - Date: <YYYY-MM-DD>
 - Risk: normal | high
+<!-- only:dual -->
 - Plan reviewed by Codex: yes | no
+<!-- /only -->
+<!-- only:claude -->
+- Plan reviewed: yes | no
+<!-- /only -->
 - Final verdict: PASS | PASS WITH NOTES | PAUSED | STUCK | FAILED | TIMED OUT
 - UI audit: PASS | NEEDS REWORK | BLOCKED | not run
 - Claude frontend: built | not needed

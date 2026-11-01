@@ -1,0 +1,15 @@
+{
+  "description": "Codex-only workflow: points Codex at its rules when a session starts.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"console.log(JSON.stringify({hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:'This repo uses the Codex-only workflow. Before planning or changing code, read .codex/workflow/CODEX.md and follow it.'}}))\""
+          }
+        ]
+      }
+    ]
+  }
+}

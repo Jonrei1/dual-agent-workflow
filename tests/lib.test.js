@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const lib = require("../skills/claude-codex-workflow/templates/codex/hooks/workflow-lib");
+const lib = require("../skills/dual-agent-workflow/templates/codex/hooks/workflow-lib");
 
 // A NUL byte in an argument makes spawn throw synchronously, before any timer exists. That path
 // used to reach clearTimeout(timer) inside the temporal dead zone and reject the promise.

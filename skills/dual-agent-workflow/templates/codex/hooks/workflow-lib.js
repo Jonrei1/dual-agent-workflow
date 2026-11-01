@@ -111,6 +111,22 @@ function fileHash(file) {
   }
 }
 
+// Which agents this clone uses, as the installer recorded it: "dual" (Claude + Codex),
+// "claude" (--claude-only) or "codex" (--codex-only).
+function workflowMode(repoRoot) {
+  const mode = readJsonFile(path.join(repoRoot, ".codex", "workflow-manifest.json"))?.mode;
+  return mode === "claude" || mode === "codex" ? mode : "dual";
+}
+
+// Keeps the template blocks meant for this mode. A block is
+//   <!-- only:claude,dual -->
+//   ...
+//   <!-- /only -->
+// with each marker on its own line; blocks for other modes are dropped with their markers.
+function forMode(text, mode) {
+  return text.replace(/^<!-- only:([\w,]+) -->\r?\n([\s\S]*?)^<!-- \/only -->(?:\r?\n|$)/gm, (_, modes, body) => (modes.split(",").includes(mode) ? body : ""));
+}
+
 // ---- Plans -------------------------------------------------------------------------------
 
 function frontmatter(text) {
@@ -282,6 +298,8 @@ function planChecklist(repoRoot, slug, text) {
   const phases = parsePhases(text);
   const items = [];
   const add = (ok, item, detail = "") => items.push({ ok, item, detail });
+  // Codex-only projects have no Claude: Codex builds the frontend inside its phases.
+  const codexOnly = workflowMode(repoRoot) === "codex";
 
   add(Boolean(meta.task) && !isPlaceholder(meta.task) && meta.task === slug, "frontmatter task matches the file name", meta.task === slug ? "" : `task: ${meta.task || "(missing)"}, file: ${slug}`);
   add(["normal", "high"].includes(meta.risk), "frontmatter risk is normal or high", meta.risk || "(missing)");
@@ -291,7 +309,7 @@ function planChecklist(repoRoot, slug, text) {
 
   const ids = acceptanceIds(text);
   add(ids.length > 0, "acceptance items have ids (`- A1: ...`)");
-  const frontend = meta.ui === "yes" ? frontendSpec(text) : null;
+  const frontend = meta.ui === "yes" && !codexOnly ? frontendSpec(text) : null;
   const covered = new Set([...phases.flatMap((phase) => phase.covers || []), ...(frontend ? frontend.covers : [])]);
   const uncovered = ids.filter((id) => !covered.has(id));
   add(uncovered.length === 0, "every acceptance item is covered by a phase", uncovered.join(", "));
@@ -302,7 +320,7 @@ function planChecklist(repoRoot, slug, text) {
     const label = `Phase ${phase.id}`;
     const filled = (value) => value !== null && !isPlaceholder(value) && value.replace(/[.\s]/g, "") !== "";
     add(!isPlaceholder(phase.title), `${label}: title`);
-    add(!frontendPattern.test(phase.scope || ""), `${label}: **Scope:** is backend only (frontend files are Claude's: list them under ## Frontend (Claude), not in a phase)`, (frontendPattern.exec(phase.scope || "") || [""])[0].trim());
+    if (!codexOnly) add(!frontendPattern.test(phase.scope || ""), `${label}: **Scope:** is backend only (frontend files are Claude's: list them under ## Frontend (Claude), not in a phase)`, (frontendPattern.exec(phase.scope || "") || [""])[0].trim());
     add(filled(phase.scope), `${label}: **Scope:**`);
     add(filled(phase.steps), `${label}: **Steps:**`);
     add(phase.covers !== null && phase.covers.length > 0, `${label}: **Covers:** acceptance ids`);
@@ -326,12 +344,13 @@ function planChecklist(repoRoot, slug, text) {
     add(Boolean(ui.url), "UI audit URL (plan `- URL:` or verify.json ui.url)");
     add(Boolean(ui.startCommand), "UI audit start command (plan `- Start:` or verify.json ui.startCommand)");
     add(Boolean(spec && spec.checks.length), "UI audit has `- Checks:` items");
+    add(Boolean(ui.browser), "UI audit browser is headless or headed (plan `- Browser:` or verify.json ui.headed); ask the user");
+    if (codexOnly) return items;
     const front = frontendSpec(text);
     add(front !== null && front.body.replace(/\*\*Covers:\*\*[^\n]*/, "").replace(/<[^>]*>/g, "").trim() !== "", "ui: yes has a `## Frontend (Claude)` section listing the pages and components Claude builds");
     add(Boolean(front && front.covers.length), "`## Frontend (Claude)` has `**Covers:**` acceptance ids");
     const last = phases[phases.length - 1];
     if (last) add(last.handsOff !== null && !isPlaceholder(last.handsOff) && last.handsOff.replace(/[.\s]/g, "") !== "", `Phase ${last.id}: **Hands off:** (the API contract Claude builds the frontend against)`);
-    add(Boolean(ui.browser), "UI audit browser is headless or headed (plan `- Browser:` or verify.json ui.headed); ask the user");
   }
   return items;
 }
@@ -861,6 +880,34 @@ async function findCodexSession(repoRoot, options = {}) {
   return pickCodexSession(live.threads, repoRoot);
 }
 
+// ---- Headless Codex calls ----------------------------------------------------------------
+
+// Windows starts codex through a .cmd shim, which needs a shell. Arguments are quoted, and
+// the messages the workflow sends contain no shell metacharacters.
+function runCodex(repoRoot, commandArgs, options = {}) {
+  const quote = (arg) => (/[\s()]/.test(arg) ? `"${arg}"` : arg);
+  return spawnSync(isWindows ? ["codex", ...commandArgs].map(quote).join(" ") : "codex", isWindows ? [] : commandArgs, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 256 * 1024 * 1024,
+    shell: isWindows,
+    ...options,
+  });
+}
+
+// One read-only, ephemeral `codex exec` whose final answer follows `schema`. The prompt goes
+// through stdin. Resolves { status, error, structured (parsed answer or null), text, outFile }.
+function runCodexJson(repoRoot, { prompt, schema, dir, name, timeout, env }) {
+  fs.mkdirSync(dir, { recursive: true });
+  const schemaFile = path.join(dir, `${name}-schema.json`);
+  const outFile = path.join(dir, `${name}-output.json`);
+  fs.writeFileSync(schemaFile, JSON.stringify(schema, null, 2));
+  fs.rmSync(outFile, { force: true });
+  const result = runCodex(repoRoot, ["exec", "--sandbox", "read-only", "--ephemeral", "--output-schema", schemaFile, "-o", outFile, "-"], { input: prompt, timeout, ...(env ? { env } : {}) });
+  return { status: result.status, error: result.error, structured: readJsonFile(outFile), text: `${result.stdout || ""}\n${result.stderr || ""}`.trim(), outFile };
+}
+
 // ---- Playwright --------------------------------------------------------------------------
 
 // Use the MCP package's Playwright dependency so the downloaded browser matches it.
@@ -887,6 +934,10 @@ module.exports = {
   killTree,
   workflowPaths,
   fileHash,
+  workflowMode,
+  forMode,
+  runCodex,
+  runCodexJson,
   gitOut,
   treeExists,
   snapshot,

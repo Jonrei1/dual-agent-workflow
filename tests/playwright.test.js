@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { setupPlaywright, resolveInstallation } = require("../skills/claude-codex-workflow/scripts/playwright");
+const { setupPlaywright, resolveInstallation } = require("../skills/dual-agent-workflow/scripts/playwright");
 
 function fixture(options = {}) {
   const calls = [];
@@ -45,8 +45,9 @@ function fixture(options = {}) {
         return { status: browserReady ? 0 : 1 };
       }
       if (args[1] === "add") {
-        if (args[4] === options.registrationFails) return { status: 1 };
-        registered.add(args[4]);
+        const name = command === "claude" ? args[4] : args[2];
+        if (name === options.registrationFails) return { status: 1 };
+        registered.add(name);
         return { status: 0 };
       }
       throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
@@ -64,6 +65,16 @@ test("only Claude gets Playwright, since Claude does the UI audits", async () =>
   assert.deepEqual(writes.map((call) => call.command), ["npm", process.execPath, "claude", "claude"]);
   assert.ok(!f.calls.some((call) => call.command === "codex"));
   assert.ok(f.records.every((record) => record.ok === true));
+});
+
+test("a Codex-only project registers both servers for Codex instead", async () => {
+  const f = fixture();
+  await setupPlaywright({ ...f.env, client: "codex" });
+  const adds = f.calls.filter((call) => call.args[1] === "add");
+  assert.deepEqual(adds.map((call) => [call.command, ...call.args.slice(0, 4)]), [["codex", "mcp", "add", "playwright", "--"], ["codex", "mcp", "add", "playwright-headed", "--"]]);
+  assert.ok(adds[0].args.includes("--headless") && !adds[1].args.includes("--headless"));
+  assert.ok(!f.calls.some((call) => call.command === "claude"));
+  assert.ok(f.records.some((record) => record.step === "Playwright headed (codex)" && record.ok === true));
 });
 
 test("first setup installs the server and matching browser, then registers a headless and a headed server", async () => {

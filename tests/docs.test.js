@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const repo = path.join(__dirname, "..");
-const skill = path.join(repo, "skills", "claude-codex-workflow");
+const skill = path.join(repo, "skills", "dual-agent-workflow");
 const templates = path.join(skill, "templates");
 
 function files(dir) {
@@ -13,6 +13,7 @@ function files(dir) {
 }
 
 const read = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+const { forMode } = require(path.join(templates, "codex", "hooks", "workflow-lib"));
 const docs = [path.join(repo, "README.md"), path.join(skill, "SKILL.md"), path.join(repo, "commands", "setup.md")];
 // README sections that deliberately talk about what was removed.
 const upgradeSection = /^## Upgrading\n[\s\S]*?(?=^## |$(?![\s\S]))/m;
@@ -26,8 +27,8 @@ test("v4 templates and docs describe the single-driver protocol and no removed f
   }
 });
 
-test("Impeccable, caveman and the shared layout are gone from code, templates and docs", () => {
-  const gone = /impeccable|caveman|--shared|PRODUCT\.md|DESIGN\.md/i;
+test("Impeccable, the caveman skill copies and the shared layout are gone from code, templates and docs", () => {
+  const gone = /impeccable|--shared|PRODUCT\.md|DESIGN\.md/i;
   const code = [...files(templates), ...files(path.join(skill, "scripts")), ...docs, path.join(repo, "package.json"), ...files(path.join(repo, ".claude-plugin"))];
   for (const file of code) {
     let text = read(file);
@@ -40,13 +41,13 @@ test("Impeccable, caveman and the shared layout are gone from code, templates an
 });
 
 test("the rules wire in ponytail, taste-skill, the headed or headless question and Claude-owned frontend", () => {
-  const claude = read(path.join(templates, "CLAUDE.workflow.md"));
+  const claude = forMode(read(path.join(templates, "CLAUDE.workflow.md")), "dual");
   assert.ok(claude.trimEnd().split("\n").length <= 100);
   assert.ok(/```md\n([\s\S]*?)```/.exec(claude)[1].trimEnd().split("\n").length <= 25);
   for (const term of ["AskUserQuestion", "manual phases", "review", "handoff", "wait", "final-ui-audit.md", ".codex/tasks/", "git commit"]) assert.ok(claude.includes(term), term);
   for (const term of ['model: "haiku"', "### Frontend", "Claude builds every frontend, from the start", "## Frontend (Claude)", "backend only", "Don't write app files while the run is active", "/ponytail-review", "redesign-existing-projects", "design-taste-frontend", "headed", "headless", "mcp__playwright-headed__*", "- Browser:", "worktree"]) assert.ok(claude.includes(term), term);
   assert.match(claude, /^<!-- dual-agent-workflow:end -->\n?$/m);
-  const codex = read(path.join(templates, "AGENTS.codex.md"));
+  const codex = forMode(read(path.join(templates, "AGENTS.codex.md")), "dual");
   assert.match(claude, /backend and API, standalone functions and logic, and web scraping/);
   assert.match(claude, /Route every new plan that changes app code by task type, without asking/);
   assert.match(codex, /standalone functions and logic, and web scraping/);
@@ -68,8 +69,23 @@ test("the rules wire in ponytail, taste-skill, the headed or headless question a
   assert.match(read(path.join(templates, "codex", "hooks", "claude-verify.js")), /ANY change to frontend files/);
 });
 
+test("single-agent rules are short, carry nothing about the absent agent and spend tokens carefully", () => {
+  const claude = forMode(read(path.join(templates, "CLAUDE.workflow.md")), "claude");
+  assert.ok(claude.trimEnd().split("\n").length <= 85);
+  assert.ok(/```md\n([\s\S]*?)```/.exec(claude)[1].trimEnd().split("\n").length <= 25);
+  assert.doesNotMatch(claude, /handoff|autopilot\.js (review|wait)|Codex implements|<!-- only/);
+  for (const term of ["at most 1 Explore subagent", "graphify query", "caveman", "/ponytail-review", "Before every git commit", "git commit --only", "final-ui-audit.md", "mcp__playwright-headed__*"]) assert.ok(claude.includes(term), term);
+  const codex = forMode(read(path.join(templates, "AGENTS.codex.md")), "codex");
+  assert.doesNotMatch(codex, /Claude|handoff|<!-- only|Never run git commit/);
+  for (const term of ["This project uses Codex alone", "wait for explicit approval", "once,\n     on the last phase", "$caveman:caveman", "$ponytail:ponytail", "graphify query", "git commit --only", "final-ui-audit.md", "taste-skill"]) assert.ok(codex.includes(term), term);
+  const template = forMode(read(path.join(templates, "plans", "_template.md")), "codex");
+  assert.doesNotMatch(template, /Claude|<!-- only/);
+  assert.match(read(path.join(templates, "codex", "hooks.json")), /SessionStart[\s\S]*\.codex\/workflow\/CODEX\.md/);
+  assert.doesNotMatch(read(path.join(templates, "codex", "hooks.json")), /hook-guard/);
+});
+
 test("Claude asks approval for every phase commit before continuing, with final QA across commits", () => {
-  const claude = read(path.join(templates, "CLAUDE.workflow.md"));
+  const claude = forMode(read(path.join(templates, "CLAUDE.workflow.md")), "dual");
   assert.match(claude, /handoff .*--phase N/);
   assert.match(claude, /both automatic and manual modes/);
   assert.match(claude, /Paused \(0\): review the passing phase, ask approval and commit, then handoff --phase/);
@@ -87,26 +103,33 @@ test("Claude asks approval for every phase commit before continuing, with final 
   assert.match(claude, /base HEAD and all checkpoint SHAs/);
   assert.doesNotMatch(claude, /Never run git commit|\/ponytail-review uncommitted/);
   assert.match(read(path.join(templates, "AGENTS.codex.md")), /Never run git commit, git add, git stash or git push/);
-  assert.match(read(path.join(templates, "plans", "_template.md")), /Suggested commit \(Claude proposes after PASS; requires approval\)/);
+  assert.match(forMode(read(path.join(templates, "plans", "_template.md")), "dual"), /Suggested commit \(Claude proposes after PASS; requires approval\)/);
 });
 
-test("docs state the call counts and every doc names the two plugins", () => {
+test("docs state the call counts, the single-agent modes and every plugin", () => {
   for (const file of docs.slice(0, 2)) {
     const text = read(file);
     assert.match(text, /phases \+ reworks/);
+    assert.match(text, /1 \+ reworks/);
+    assert.match(text, /--claude-only/);
+    assert.match(text, /--codex-only/);
+    assert.match(text, /caveman/);
     assert.doesNotMatch(text, /1 \+ UI reworks/);
     assert.match(text, /no UI calls|no headless UI calls/);
     assert.match(text, /ponytail/);
     assert.match(text, /taste-skill/);
   }
   assert.match(read(docs[2]), /ponytail/);
+  assert.match(read(docs[2]), /--claude-only\|--codex-only/);
   assert.match(read(docs[0]), /Several developers, one repo/);
   assert.match(read(docs[0]), /playwright-headed/);
 });
 
-test("versions and manifests agree on v4", () => {
-  for (const file of ["package.json", ".claude-plugin/plugin.json"]) assert.strictEqual(JSON.parse(read(path.join(repo, file))).version, "4.1.0");
+test("versions and manifests agree on v4.2", () => {
+  for (const file of ["package.json", "package-lock.json", ".claude-plugin/plugin.json"]) assert.strictEqual(JSON.parse(read(path.join(repo, file))).version, "4.2.0");
   const marketplace = JSON.parse(read(path.join(repo, ".claude-plugin", "marketplace.json")));
   assert.match(marketplace.plugins[0].description, /ponytail/);
+  assert.match(marketplace.plugins[0].description, /--codex-only/);
+  assert.match(JSON.parse(read(path.join(repo, "package.json"))).repository, /dual-agent-workflow/);
   assert.ok(JSON.parse(read(path.join(repo, "package.json"))).files.includes("skills"));
 });

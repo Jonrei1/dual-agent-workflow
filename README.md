@@ -1,10 +1,10 @@
 # Dual-agent workflow (Claude + Codex)
 
-A Claude Code plugin and standalone installer that lets Claude and Codex work on one Git project as a team. Claude plans, reviews and **builds every frontend itself, from the start**. Codex builds the backend, standalone functions and web scraping, routed to it automatically by task type. Local scripts check every step in between. Two plugins keep the work small and good: **ponytail** (a senior developer and QA reviewer) and **taste-skill** (UI/UX direction). One setup command installs what's missing (Claude Code, Codex CLI, **Playwright MCP and Chromium**, graphify, ponytail, taste-skill) and wires the workflow into the project.
+A Claude Code plugin and standalone installer that lets Claude and Codex work on one Git project as a team. Claude plans, reviews and **builds every frontend itself, from the start**. Codex builds the backend, standalone functions and web scraping, routed to it automatically by task type. Local scripts check every step in between. Three plugins keep the work small, good and cheap: **ponytail** (a senior developer and QA reviewer), **taste-skill** (UI/UX direction) and **caveman** (terse replies, fewer output tokens). One setup command installs what's missing (Claude Code, Codex CLI, **Playwright MCP and Chromium**, graphify, ponytail, taste-skill, caveman) and wires the workflow into the project. Only have one of the agents? [`--claude-only` or `--codex-only`](#one-agent-only) sets the same workflow up for it alone.
 
 Everything the workflow writes stays **local to your clone**. Plans, logs, task summaries and the agents' rules are hidden through `.git/info/exclude`, and setup never edits a file git tracks. Claude prepares a commit after each reviewed, passing phase and always asks for your approval before committing, so you can backtrack by commit. It preserves unrelated work and never stashes or pushes. Codex and the helper never commit.
 
-> The plugin was called `claude-codex-workflow` before v3.1. Claude Code reserves plugin names that start with `claude-`, so it is now **`dual-agent-workflow`**. See [Upgrading](#upgrading). The GitHub repository keeps its name.
+> The plugin was called `claude-codex-workflow` before v3.1. Claude Code reserves plugin names that start with `claude-`, so it is now **`dual-agent-workflow`**. See [Upgrading](#upgrading). The GitHub repository is now `Jonrei1/dual-agent-workflow` too (the old `Claude-Codex-Workflow` URL redirects).
 
 ## Contents
 
@@ -12,6 +12,7 @@ Everything the workflow writes stays **local to your clone**. Plans, logs, task 
 - [Step by step: install once](#step-by-step-install-once)
 - [Step by step: each project](#step-by-step-each-project)
 - [Daily use: what happens during a task](#daily-use-what-happens-during-a-task)
+- [One agent only](#one-agent-only)
 - [Several developers, one repo](#several-developers-one-repo)
 - [What stays local, and what the installer may touch](#what-stays-local-and-what-the-installer-may-touch)
 - [Updating](#updating)
@@ -112,8 +113,9 @@ sequenceDiagram
 | Headless Claude | One read-only alignment and QA review per passing phase; frontend files in a Codex phase count as out of scope | A second opinion checked against the plan, with write tools denied |
 | ponytail | Senior dev and QA: the smallest change that solves the task, plus `/ponytail-review` | Fewer phases, no speculative dependencies or abstractions, a real QA pass |
 | taste-skill | UI/UX art direction while Claude builds the frontend | Less generic UI, with bounds so the work can't balloon |
+| caveman | Terse replies in chat; code, commits, plans and reports stay normal prose | Fewer output tokens on every turn |
 | Playwright MCP + Chromium | Claude's own check of the frontend it built, **headless or headed** | Real navigation, clicks, forms, console errors, failed requests and screenshots at several viewports; headed lets you watch |
-| graphify | Shared code graph and search/read guards | Finds affected modules and dependents before editing |
+| graphify | Shared code graph, its skill for each agent, and Claude's search/read guard hooks | Finds affected modules and dependents before editing, instead of reading raw files |
 | `autopilot.js` and `claude-verify.js` | Local Node scripts under `.codex/` | Snapshots, gates, reviews, verdicts and closing. They coordinate the agents; they are not another model |
 
 Choosing **Claude implements** skips the handoff, the per-phase reviews and the headless calls. Use it for small changes where the extra review isn't worth the time and usage.
@@ -131,7 +133,7 @@ Do this once per machine.
 2. **Add the plugin** in Claude Code:
 
    ```text
-   /plugin marketplace add Jonrei1/Claude-Codex-Workflow
+   /plugin marketplace add Jonrei1/dual-agent-workflow
    /plugin install dual-agent-workflow@dual-agent-workflow
    ```
 
@@ -152,13 +154,13 @@ Do this in every repository that should use the workflow, in your own clone. Sta
    Or, without the plugin, from the project root:
 
    ```sh
-   npx github:Jonrei1/Claude-Codex-Workflow --yes
-   npx github:Jonrei1/Claude-Codex-Workflow --dry-run   # show what it would do, change nothing
+   npx github:Jonrei1/dual-agent-workflow --yes
+   npx github:Jonrei1/dual-agent-workflow --dry-run   # show what it would do, change nothing
    ```
 
    If graphify is missing and you didn't pass `--graphify-scope`, Claude asks whether to install it for your **user** (recommended, no admin rights) or **globally** (system-wide `pip`, usually admin). `--yes` doesn't answer that.
 
-   `--yes` approves missing global tools (Claude Code and Codex CLI through npm), the Chromium download, missing Playwright MCP registrations and the ponytail and taste-skill plugins. After the first project, use `--project-only` to skip the machine setup.
+   `--yes` approves missing global tools (Claude Code and Codex CLI through npm), the Chromium download, missing Playwright MCP registrations, graphify's skill for each agent and the ponytail, taste-skill and caveman plugins. Add `--claude-only` or `--codex-only` when you use one agent (see [One agent only](#one-agent-only)). After the first project, use `--project-only` to skip the machine setup.
 2. **Read the output.**
    - Every line is `ok`, `--` (skipped or only pointed out) or `FAIL`.
    - "tracked by git, left unchanged" is expected. The workflow uses a local equivalent and never edits a tracked file.
@@ -177,12 +179,12 @@ Do this in every repository that should use the workflow, in your own clone. Sta
 | Prerequisites | Checks Node and Git; reports what's missing instead of installing it | Your machine |
 | Agent CLIs | Installs a missing `@anthropic-ai/claude-code` and `@openai/codex` | Global npm packages |
 | Playwright | Installs a missing `@playwright/mcp` and the Chromium build that matches it | Global npm package and browser cache |
-| Browser connections | Adds missing `playwright` (headless) and `playwright-headed` MCP registrations for Claude | `~/.claude.json` |
-| Plugins | Installs a missing ponytail and taste-skill for Claude (`claude plugin install`) and Codex (`codex plugin add`) | Your user-level plugin folders |
-| graphify | Installs a missing graphify: user scope via `uv tool`, `pipx` or `pip --user`; global via `pip` | User directory or system-wide |
+| Browser connections | Adds missing `playwright` (headless) and `playwright-headed` MCP registrations for the agent that builds the frontend: Claude, or Codex with `--codex-only` | `~/.claude.json` or `~/.codex/config.toml` |
+| Plugins | Installs a missing ponytail, taste-skill and caveman for each agent in use: Claude (`claude plugin install`) and Codex (`codex plugin add`; caveman comes from Codex's curated marketplace) | Your user-level plugin folders |
+| graphify | Installs a missing graphify: user scope via `uv tool`, `pipx` or `pip --user`; global via `pip`. Then `graphify install --platform claude` (or `codex`) adds its skill for each agent in use | User directory or system-wide; `~/.claude/skills/graphify`, `~/.codex/skills/graphify` |
 | Helper scripts | Copies or updates the workflow-owned scripts and Codex rules | `.codex/autopilot.js`, `.codex/hooks/*.js`, `.codex/workflow/CODEX.md` |
-| Claude rules and plan hook | Merges the `## Workflow` section and an `ExitPlanMode` hook | `CLAUDE.local.md`, `.claude/settings.local.json` |
-| Codex hooks | Merges the graphify guards into an untracked project hooks file; removes the old v2 Stop hook | `.codex/hooks.json`, `~/.codex/hooks.json` |
+| Claude rules and hooks | Merges the `## Workflow` section, an `ExitPlanMode` hook and graphify's search/read guard hooks (skipped when the shared `.claude/settings.json` has them) | `CLAUDE.local.md`, `.claude/settings.local.json` |
+| Codex hooks | `--codex-only`: a SessionStart hook that points Codex at its rules. Always: removes the old v2 Stop hook and the graphify guards earlier versions put there (Codex rejects the context they print) | `.codex/hooks.json`, `~/.codex/hooks.json` |
 | Plan template | Creates the plan template | `.codex/plans/_template.md` |
 | Hiding | Adds every workflow path to `.git/info/exclude` (never `.gitignore`) | `.git/info/exclude` |
 | Manifest | Records what this version installed, so later versions can remove scripts it dropped | `.codex/workflow-manifest.json` |
@@ -191,14 +193,15 @@ Do this in every repository that should use the workflow, in your own clone. Sta
 
 | Flag | Effect |
 |---|---|
-| `--yes` | Approve missing machine tools, Playwright setup and the two plugins without prompts. graphify uses user scope. |
+| `--yes` | Approve missing machine tools, Playwright setup, graphify's skills and the plugins without prompts. graphify uses user scope. |
+| `--claude-only` or `--codex-only` | Set the workflow up for one agent (default: both). Kept in the manifest, so later runs and sync keep the mode until you pass the other flag. |
 | `--dry-run` | Print what would happen; install and write nothing. |
 | `--tools-only` | Machine tools, Chromium, Playwright registrations and plugins only. |
 | `--project-only` | Project files only; skip machine installs, the Chromium download, MCP registration and plugins. |
 | `--skip-playwright` | Skip the Playwright package, browser download and registrations. |
-| `--skip-skills` | Skip the ponytail and taste-skill plugins. |
+| `--skip-skills` | Skip the ponytail, taste-skill and caveman plugins. |
 | `--graphify-scope=user` or `global` | Where a missing graphify is installed, without asking. |
-| `--skip-graphify` | Skip graphify's installation check. |
+| `--skip-graphify` | Skip graphify's skills and Claude's graphify guard hooks. |
 | `--sync` | Quiet, files-only upgrade of a set-up project. Run by the plugin's SessionStart hook. |
 | `--root <dir>` | Configure the Git repository that contains `<dir>`. |
 
@@ -237,6 +240,25 @@ If a run gets stuck or fails, Claude explains why and asks before sending `hando
 
 With **manual phases**, `handoff --phase N` sends one phase at a time. A passing phase pauses the run, and `wait` prints the next `handoff --phase` command. `wait` also notices when a Codex turn ends or its session closes mid-run, and passes on Codex's last message. Snapshots use a temporary Git index and tree objects. The helper leaves your staging area and branches untouched; Claude creates each phase commit only after your approval. Direct helper handoffs without `--phase` still run the full plan without intermediate Claude commits.
 
+## One agent only
+
+The workflow runs with just Claude or just Codex. Pass the flag once; the mode is saved in `.codex/workflow-manifest.json`, so re-runs and the automatic sync keep it, and passing the other flag switches it (the other agent's rules and hooks are removed).
+
+```text
+/dual-agent-workflow:setup --yes --claude-only
+npx github:Jonrei1/dual-agent-workflow --yes --codex-only
+```
+
+| | `--claude-only` | `--codex-only` |
+|---|---|---|
+| Installs | Claude Code, Playwright for Claude, plugins and graphify skill for Claude | Codex CLI, Playwright for Codex, plugins and graphify skill for Codex |
+| Rules | `CLAUDE.local.md`: Claude plans and builds everything, backend and frontend | `.codex/workflow/CODEX.md`, loaded by a SessionStart hook: Codex plans, waits for your approval, builds everything |
+| Checks | Each phase's gate and the project checks | `autopilot.js` gates and checks on every phase |
+| Model reviews | None per phase; one `/ponytail-review` QA pass over the whole task | One read-only `codex exec` alignment review per task, on the last phase, over the whole diff; plan review only for `risk: high` |
+| Commits | After each passing phase, only with your approval | Same |
+
+One agent carries the whole task, so these modes are built to spend less: the rules carry nothing about the absent agent, model reviews run once per task instead of once per phase, subagents are capped at one Explore (haiku), caveman keeps replies short, and graphify answers questions about the code before raw files are read.
+
 ## Several developers, one repo
 
 The workflow is built for each developer working in their **own clone** of a shared repo:
@@ -245,7 +267,8 @@ The workflow is built for each developer working in their **own clone** of a sha
 - **One run per working tree.** The run state (`.codex/autopilot/status.json`) belongs to the checkout. If a run is active, `begin` refuses and names who started it (git email, OS user and machine).
 - **Parallel tasks use git worktrees.** `git worktree add ../my-task` gives a second checkout. The plugin's SessionStart sync sets the workflow up there automatically, from the main worktree's manifest.
 - **Reports are per task.** Everything a task writes is under `.codex/verify/<task>/` and `.codex/autopilot/<task>.*`, so tasks never overwrite each other's reports.
-- **User-level pieces are per user.** The Playwright registrations, the ponytail and taste-skill plugins, and graphify live in each developer's own home folders.
+- **User-level pieces are per user.** The Playwright registrations, the ponytail, taste-skill and caveman plugins, and graphify live in each developer's own home folders.
+- **The mode is per clone.** One developer can use `--claude-only` while a teammate uses both agents.
 
 Several OS users editing the very same folder is not supported: their changes would show up in each other's phase diffs. Give each their own clone or worktree.
 
@@ -332,6 +355,7 @@ For repeatable UI acceptance, prefer a project `@playwright/test` spec gate with
 The installer calls no models; running it through Claude uses conversation tokens. Claude and Codex bill separately, and headless Claude uses your own authenticated account or API key.
 
 - Headless Claude calls = **(phases + reworks)**, one alignment call each. Three phases without rework use three calls. There are no headless UI calls: Claude audits its own frontend in your session.
+- `--codex-only`: **1 + reworks** read-only `codex exec` alignment calls per task, all on the last phase. `--claude-only`: no headless calls.
 - Gate and check failures before alignment add no model calls.
 - Plan review is one Codex call.
 - Interactive planning, building the frontend and auditing it, the QA pass and the summary are normal Claude session usage.
@@ -370,7 +394,8 @@ Fewer, smaller phases are the main saving, which is why the plan rules ask for t
 
 **Plugins:**
 
-- **ponytail or taste-skill missing:** run `/dual-agent-workflow:setup --yes --tools-only`, or install them yourself (`/plugin marketplace add DietrichGebert/ponytail`, `/plugin install ponytail@ponytail`, likewise `Leonxlnx/taste-skill`). The rules fall back to plain review when they're absent.
+- **ponytail, taste-skill or caveman missing:** run `/dual-agent-workflow:setup --yes --tools-only`, or install them yourself (`/plugin marketplace add DietrichGebert/ponytail`, `/plugin install ponytail@ponytail`, likewise `Leonxlnx/taste-skill` and `JuliusBrussee/caveman`; in Codex, `codex plugin add caveman@openai-curated-remote`). The rules fall back to plain review and normal replies when they're absent.
+- **Codex-only: Codex ignores the workflow:** trust the SessionStart hook in Codex (`/hooks`) and start a new thread. A tracked `.codex/hooks.json` can't get the hook; start each thread with "follow .codex/workflow/CODEX.md".
 
 **Manifest:**
 
@@ -398,13 +423,15 @@ Fewer, smaller phases are the main saving, which is why the plan rules ask for t
 **Local-only guarantees**
 - **`.git/info/exclude` is per clone.** Every developer runs setup in their own clone, and exclusion can't hide a file that is already tracked.
 - **Tracked files are never fixed for you.** A tracked `.codex/hooks.json` with the old Stop hook, and old workflow sections in `CLAUDE.md`, `AGENTS.md` or `.gitignore`, need a normal team commit.
-- **Sync restores the workflow's hooks.** If you delete the graphify guards or the `ExitPlanMode` hook from the local files, the next session adds them back.
+- **Sync restores the workflow's hooks.** If you delete the graphify guards or the `ExitPlanMode` hook from the local files, the next session adds them back. Run setup with `--skip-graphify` if you don't want the guards; sync remembers that.
 - **The `## Workflow` section in `CLAUDE.local.md` belongs to the plugin.** Edits inside it are replaced on update; keep your own notes below its end marker.
 - **Merged JSON files are rewritten.** `.claude/settings.local.json` and an untracked `.codex/hooks.json` come back with 2-space indentation and LF line endings.
 - **Case-only path differences** on case-insensitive file systems can hide a tracked file from the tracked-file check.
 - **Two sessions starting at the same moment** can, rarely, append the exclude block twice. That is harmless.
 
 ## Upgrading
+
+**From 4.1.** Update the plugin; the next session's sync does the rest. The graphify guards move from `.codex/hooks.json` (Codex rejected their output) to `.claude/settings.local.json`. Run `/dual-agent-workflow:setup --yes --tools-only` once per machine to add caveman and graphify's skill for each agent. The plugin's skill folder is now `skills/dual-agent-workflow` and the repository is `Jonrei1/dual-agent-workflow`; the old URL redirects.
 
 **From 3.x (including plugins that still use Impeccable or caveman).** Update the plugin; the next session's sync does the rest, with no re-run of setup:
 
@@ -422,7 +449,7 @@ Fewer, smaller phases are the main saving, which is why the plan rules ask for t
 ```text
 /plugin uninstall claude-codex-workflow@claude-codex-workflow
 /plugin marketplace remove claude-codex-workflow
-/plugin marketplace add Jonrei1/Claude-Codex-Workflow
+/plugin marketplace add Jonrei1/dual-agent-workflow
 /plugin install dual-agent-workflow@dual-agent-workflow
 ```
 
@@ -440,7 +467,7 @@ The tests use fake `claude` and `codex` CLIs and temporary repositories. Every t
 | `.claude-plugin/` | Plugin and marketplace manifests (`claude plugin validate .`) |
 | `commands/setup.md` | The `/dual-agent-workflow:setup` command |
 | `hooks/hooks.json` | SessionStart hook that runs `install.js --sync` |
-| `skills/claude-codex-workflow/SKILL.md` | Setup reference: flags, check detection, file destinations |
-| `skills/claude-codex-workflow/scripts/` | `install.js` (installer and sync), `playwright.js` and `skills.js` |
-| `skills/claude-codex-workflow/templates/` | Claude and Codex rules, plan template, `.codex/` helper scripts |
+| `skills/dual-agent-workflow/SKILL.md` | Setup reference: flags, check detection, file destinations |
+| `skills/dual-agent-workflow/scripts/` | `install.js` (installer and sync), `playwright.js` and `skills.js` |
+| `skills/dual-agent-workflow/templates/` | Claude and Codex rules, plan template, `.codex/` helper scripts |
 | `tests/` | Vitest suites, shared helpers and the fake Codex fixture |
