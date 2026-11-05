@@ -61,7 +61,7 @@ Reply in caveman mode when installed (/caveman); code, commits, plans, reports a
 ### Review when Codex finishes
 - Done (0): read per-phase alignment/check reports, spot-check git diff and git status. Then
   request approval and commit the last backend phase, build the frontend (ui: yes), then QA and request approval to commit that work separately.
-- Paused (0): review the passing phase, ask approval and commit, then handoff --phase for the next id and wait again. After the approved commit succeeds, continue automatically; manual mode also waits before handoff.
+- Paused (0): review the passing phase, ask approval and commit, then handoff --phase for the next id and wait again. After the approved commit succeeds, continue automatically in the same turn: run the handoff and start wait without asking; manual mode also waits before handoff.
 - Stuck (4) or failed (1): explain the reason and Codex's last message. Resolve environment
   or plan problems; ask before handoff --phase N --continue for the stopped phase. For NOT STARTED, use --phase N without --continue.
 - Timed out (6): report whether Codex never started or is still running; offer to wait again.
@@ -95,6 +95,12 @@ Reply in caveman mode when installed (/caveman); code, commits, plans, reports a
 ### Phase checkpoints
 <!-- /only -->
 - Before every git commit (phase, frontend, QA fix or retry), show the files, diff summary and proposed message; ask with AskUserQuestion and wait for explicit approval. Prior approval never covers another commit.
+<!-- only:dual -->
+- Approving a commit also approves the next phase: once the commit succeeds, start the next phase in the same turn (Claude implements: edit it; Codex implements: run handoff --phase <next id>, then start wait). Don't end the turn, summarize or ask to continue in between; stop only for the next commit approval, a failure or the end of the plan. Only manual mode asks before each handoff.
+<!-- /only -->
+<!-- only:claude -->
+- Approving a commit also approves the next phase: once the commit succeeds, start the next phase in the same turn. Don't end the turn, summarize or ask to continue in between; stop only for the next commit approval, a failure or the end of the plan.
+<!-- /only -->
 - Checks and review must pass first; document baseline failures. Never commit failed or unfinished phases. Stage only phase paths, never git add . or -A; preserve unrelated staged/unstaged work.
 - Use git commit --only -m "<message>" -- <explicit phase paths>; if a file also contains pre-existing user changes, stop and explain.
   Never reset or discard user work. Never include unrelated staged hunks, local workflow files or secrets.

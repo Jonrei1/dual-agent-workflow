@@ -618,7 +618,7 @@ async function cmdVerify() {
     const handoff = readJson(handoffPath) || {};
     if (next && handoff.plan === planRel && handoff.phase === phase.id) {
       setStatus({ state: "paused", nextPhase: next.id });
-      console.log(`\nVERDICT: PASS\nPAUSED\nNext: node .codex/autopilot.js handoff ${planRel} --phase ${next.id}`);
+      console.log(`\nVERDICT: PASS\nPAUSED\nNext (Claude): ask approval and commit this phase; once committed, run without asking: node .codex/autopilot.js handoff ${planRel} --phase ${next.id}`);
       return 0;
     }
     console.log(`\nVERDICT: PASS\nNext: node .codex/autopilot.js ${next ? `phase ${planRel} ${next.id}` : `close ${planRel}`}`);

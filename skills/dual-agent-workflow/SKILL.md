@@ -169,8 +169,8 @@ started it. The plan and verify.json are hashed at begin; changing either mid-ru
 All commands use `node .codex/autopilot.js`. Exit codes: 0 pass/done/paused, 1 failed,
 2 gate/check failure, 3 alignment/UI rework, 4 stuck, 5 paste, 6 wait timeout.
 Single-phase handoffs pause after intermediate PASS and wait prints the next handoff command.
-Claude asks for approval and commits the passing phase before sending that command automatically
-(except manual mode). Always show the files, diff summary and message and wait for explicit approval
+Claude asks for approval and commits the passing phase, then sends that command in the same turn
+without asking to continue (except manual mode). Always show the files, diff summary and message and wait for explicit approval
 before every commit; prior approval never covers another commit.
 The helper and Codex never commit; a direct full-plan handoff has no intermediate Claude checkpoints.
 

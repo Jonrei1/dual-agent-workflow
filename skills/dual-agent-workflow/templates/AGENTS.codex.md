@@ -63,7 +63,7 @@ Before editing, record HEAD and staged/unstaged changes in .codex/tasks/<slug>-b
      Exit 1 or 4: report the reason and end the turn. Three consecutive new gate/check
      failures or a failed alignment after two reworks stop the run as stuck.
 <!-- only:codex -->
-   - Commit the passing phase only after explicit approval (see Phase checkpoints).
+   - Commit the passing phase only after explicit approval (see Phase checkpoints), then go straight to the next phase.
 <!-- /only -->
 4. Run `node .codex/autopilot.js close .codex/plans/<task>.md`. It runs graphify update . and
 <!-- only:dual -->
@@ -123,6 +123,8 @@ Return APPROVE or CHANGES NEEDED in the requested schema; Claude assesses findin
   <explicit phase paths>. If a file also contains pre-existing user changes, stop and explain.
   Never reset or discard user work, bypass hooks, or commit local workflow files or secrets.
 - A rejected or pending approval, or a failed commit, blocks the next phase.
+- When the user approves a pending commit, commit, then continue with the next phase (or close)
+  in the same turn without asking to continue. Stop again only at the next commit approval or a blocker.
 
 ### UI audit (ui: yes)
 Build frontend phases as the finished design (taste-skill when installed:

@@ -74,10 +74,10 @@ test("single-agent rules are short, carry nothing about the absent agent and spe
   assert.ok(claude.trimEnd().split("\n").length <= 85);
   assert.ok(/```md\n([\s\S]*?)```/.exec(claude)[1].trimEnd().split("\n").length <= 25);
   assert.doesNotMatch(claude, /handoff|autopilot\.js (review|wait)|Codex implements|<!-- only/);
-  for (const term of ["at most 1 Explore subagent", "graphify query", "caveman", "/ponytail-review", "Before every git commit", "git commit --only", "final-ui-audit.md", "mcp__playwright-headed__*"]) assert.ok(claude.includes(term), term);
+  for (const term of ["at most 1 Explore subagent", "graphify query", "caveman", "/ponytail-review", "Before every git commit", "Approving a commit also approves the next phase", "git commit --only", "final-ui-audit.md", "mcp__playwright-headed__*"]) assert.ok(claude.includes(term), term);
   const codex = forMode(read(path.join(templates, "AGENTS.codex.md")), "codex");
   assert.doesNotMatch(codex, /Claude|handoff|<!-- only|Never run git commit/);
-  for (const term of ["This project uses Codex alone", "wait for explicit approval", "once,\n     on the last phase", "$caveman:caveman", "$ponytail:ponytail", "graphify query", "git commit --only", "final-ui-audit.md", "taste-skill"]) assert.ok(codex.includes(term), term);
+  for (const term of ["This project uses Codex alone", "wait for explicit approval", "without asking to continue", "once,\n     on the last phase", "$caveman:caveman", "$ponytail:ponytail", "graphify query", "git commit --only", "final-ui-audit.md", "taste-skill"]) assert.ok(codex.includes(term), term);
   const template = forMode(read(path.join(templates, "plans", "_template.md")), "codex");
   assert.doesNotMatch(template, /Claude|<!-- only/);
   assert.match(read(path.join(templates, "codex", "hooks.json")), /SessionStart[\s\S]*\.codex\/workflow\/CODEX\.md/);
@@ -89,7 +89,8 @@ test("Claude asks approval for every phase commit before continuing, with final 
   assert.match(claude, /handoff .*--phase N/);
   assert.match(claude, /both automatic and manual modes/);
   assert.match(claude, /Paused \(0\): review the passing phase, ask approval and commit, then handoff --phase/);
-  assert.match(claude, /After the approved commit succeeds, continue automatically; manual mode also waits/);
+  assert.match(claude, /After the approved commit succeeds, continue automatically in the same turn: run the handoff and start wait without asking; manual mode also waits/);
+  assert.match(claude, /Approving a commit also approves the next phase/);
   assert.match(claude, /Before every git commit \(phase, frontend, QA fix or retry\)/);
   assert.match(claude, /ask with AskUserQuestion and wait for explicit approval/);
   assert.match(claude, /Prior approval never covers another commit/);
