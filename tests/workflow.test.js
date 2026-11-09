@@ -740,8 +740,11 @@ test("single-phase handoff begins automatically, pauses on PASS and wait names n
   const result = autopilot(dir, ["verify", ".codex/plans/add-badge.md", "1"], claude.env);
   assert.strictEqual(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /PAUSED/);
+  // Codex reads verify output: it must not be told to run the next handoff itself.
+  assert.doesNotMatch(result.stdout, /Claude|without asking/);
   const waited = autopilot(dir, ["wait", ".codex/plans/add-badge.md", "--since", since, "--timeout", "2"]);
   assert.strictEqual(waited.status, 0, waited.stdout + waited.stderr);
+  assert.match(waited.stdout, /without asking/);
   assert.match(waited.stdout, /handoff .* --phase 2/);
   // Claude's checkpoint must preserve other staged work and allow the next phase to start.
   git(dir, "add", "--", "phase.txt");

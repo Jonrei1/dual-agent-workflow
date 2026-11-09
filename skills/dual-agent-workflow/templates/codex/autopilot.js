@@ -435,7 +435,7 @@ function waitSummary(current, codexMessage = "") {
   if (codexMessage) lines.push(`\nCodex's last message:\n${tail(codexMessage.trim(), 1500).replace(/^/gm, "  ")}`);
   const plan = readPlan();
   if (current.state === "paused") {
-    lines.push(`\nClaude: review the passing phase and ask for explicit approval before committing and continuing.\nNext phase: node .codex/autopilot.js handoff ${planRel} --phase ${current.nextPhase}`);
+    lines.push(`\nClaude: review the passing phase and ask for explicit approval to commit it. Once the commit succeeds, run this without asking, then start wait again:\nNext phase: node .codex/autopilot.js handoff ${planRel} --phase ${current.nextPhase}`);
   } else if (current.state === "done") {
     lines.push(`\nNext (Claude): read the reports and spot-check the diff${plan.meta.ui === "yes" ? ", then build the frontend (## Frontend (Claude)) and audit it with Playwright" : ""}, run the QA pass, then write the task summary and report to the user.`);
   } else {
@@ -618,7 +618,7 @@ async function cmdVerify() {
     const handoff = readJson(handoffPath) || {};
     if (next && handoff.plan === planRel && handoff.phase === phase.id) {
       setStatus({ state: "paused", nextPhase: next.id });
-      console.log(`\nVERDICT: PASS\nPAUSED\nNext (Claude): ask approval and commit this phase; once committed, run without asking: node .codex/autopilot.js handoff ${planRel} --phase ${next.id}`);
+      console.log(`\nVERDICT: PASS\nPAUSED\nNext: node .codex/autopilot.js handoff ${planRel} --phase ${next.id}`);
       return 0;
     }
     console.log(`\nVERDICT: PASS\nNext: node .codex/autopilot.js ${next ? `phase ${planRel} ${next.id}` : `close ${planRel}`}`);
