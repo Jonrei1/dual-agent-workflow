@@ -1,14 +1,14 @@
 ---
 description: Install the tools (Claude Code, Codex CLI, Playwright, graphify, ponytail, taste-skill, caveman) and set up the Claude + Codex workflow, or a Claude-only or Codex-only version, in this project, as local files only (tracked files are never edited).
-argument-hint: "[--yes] [--dry-run] [--claude-only|--codex-only] [--tools-only|--project-only] [--graphify-scope=user|global] [--skip-graphify] [--skip-playwright] [--skip-skills] [--root <dir>]"
+argument-hint: "[--yes] [--dry-run] [--dual|--claude-only|--codex-only] [--tools-only|--project-only] [--graphify-scope=user|global] [--skip-graphify] [--skip-playwright] [--skip-skills] [--root <dir>]"
 allowed-tools: Bash(node:*), Bash(git status:*), Read, Write, Edit, AskUserQuestion
 ---
 
 Set up the Claude + Codex workflow in the current project.
 
-0. **Pick the mode.** If `$ARGUMENTS` has neither `--claude-only` nor `--codex-only` and the
+0. **Pick the mode.** If `$ARGUMENTS` has none of `--dual`, `--claude-only` or `--codex-only` and the
    project has no `.codex/workflow-manifest.json`, ask with AskUserQuestion which agents the
-   user has: both (default), only Claude (add `--claude-only`) or only Codex (add
+   user has: both (add `--dual`), only Claude (add `--claude-only`) or only Codex (add
    `--codex-only`). A set-up project keeps its mode unless a flag changes it.
 1. **Check graphify.** Run `graphify --version`.
    - If it isn't installed, and `$ARGUMENTS` has no `--graphify-scope`, ask with AskUserQuestion
@@ -46,7 +46,7 @@ Set up the Claude + Codex workflow in the current project.
    Setup section (`/graphify .`). Stress that the user must:
    - restart Claude Code, which loads `CLAUDE.local.md`, the plan hook and the plugins;
    - trust the plugin and workflow hooks in Codex (`/hooks`) and keep a Codex session open in
-     the repo, because Claude posts plans into it with `codex queue`.
+     the repo to see output. Claude discovers it and posts tasks and code audits automatically; no open session uses headless fallback.
 6. Explain the machine-level pieces, installed only with approval:
    - Playwright setup installs a global MCP server and matching Chromium, and registers it for
      Claude twice: `playwright` (headless) and `playwright-headed` (a visible window). Claude

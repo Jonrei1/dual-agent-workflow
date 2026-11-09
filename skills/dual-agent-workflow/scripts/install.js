@@ -37,7 +37,7 @@
 //   --sync                      quiet, files-only upgrade of an already-set-up project (used by the
 //                               plugin's SessionStart hook): no tools, prompts or graphify
 //   --yes                       approve missing global tools, Playwright setup and the agent skills
-//   --claude-only | --codex-only  set the workflow up for one agent (default: Claude + Codex)
+//   --dual | --claude-only | --codex-only  explicitly select both agents or one agent
 //   --tools-only | --project-only
 //   --dry-run                   print what would happen, change nothing
 //   --graphify-scope=<s>        user (default) or global; asked on a terminal when graphify is missing
@@ -65,7 +65,7 @@ const flagValue = (name) => {
 const isWindows = process.platform === "win32";
 const dryRun = flag("--dry-run");
 const sync = flag("--sync");
-const modeFlag = flag("--claude-only") ? "claude" : flag("--codex-only") ? "codex" : "";
+const modeFlag = flag("--dual") ? "dual" : flag("--claude-only") ? "claude" : flag("--codex-only") ? "codex" : "";
 // The agents a mode uses.
 const agents = (mode) => (mode === "dual" ? ["claude", "codex"] : [mode]);
 let projectDir = "";
@@ -74,7 +74,7 @@ const pluginRoot = path.join(__dirname, "..", "..", "..");
 const pluginVersion = readJson(path.join(pluginRoot, "package.json"))?.version || readJson(path.join(pluginRoot, ".claude-plugin", "plugin.json"))?.version || "0.0.0";
 const MANIFEST = ".codex/workflow-manifest.json";
 // Scripts the workflow owns: always the plugin's version, and removed once a later version drops them.
-const OWNED = ["codex/hooks/claude-verify.js", "codex/hooks/workflow-lib.js", "codex/hooks/claude-plan-gate.js", "codex/autopilot.js"];
+const OWNED = ["codex/hooks/claude-verify.js", "codex/hooks/workflow-lib.js", "codex/hooks/claude-plan-gate.js", "codex/hooks/claude-completion-gate.js", "codex/autopilot.js"];
 const CODEX_RULES = ".codex/workflow/CODEX.md";
 // Files the user may customize: created when missing, refreshed only while still unmodified.
 const MANAGED = [["plans/_template.md", ".codex/plans/_template.md"]];
@@ -515,7 +515,7 @@ const guardKind = (command) => (graphifyGuard.test(command) ? String(command).re
 // tracked copy can't be updated by the plugin and may not be what the plugin ships. The guards
 // are skipped with --skip-graphify (sync remembers it), and when the shared .claude/settings.json already has
 // graphify's own.
-function mergeClaudeSettings(root, graphify, guards) {
+function mergeClaudeSettings(root, graphify, guards, mode) {
   const rel = ".claude/settings.local.json";
   const file = path.join(root, rel);
   const text = readText(file);
@@ -527,8 +527,18 @@ function mergeClaudeSettings(root, graphify, guards) {
   }
   config.hooks = config.hooks || {};
   const added = [];
+  const completionCommand = "node -e \"require(require('path').join(process.env.CLAUDE_PROJECT_DIR||process.cwd(),'.codex','hooks','claude-completion-gate.js'))\"";
+  for (const event of ["SessionStart", "Stop"]) {
+    const groups = (config.hooks[event] || []).map((group) => ({ ...group, hooks: (group.hooks || []).filter((hook) => hook.command !== completionCommand) })).filter((group) => group.hooks.length);
+    if (mode === "dual" && !isTracked(root, ".codex/hooks/claude-completion-gate.js")) {
+      groups.push({ hooks: [{ type: "command", command: completionCommand, timeout: 30 }] });
+    }
+    if (JSON.stringify(groups) !== JSON.stringify(config.hooks[event] || [])) added.push(`${event} completion check`);
+    if (groups.length) config.hooks[event] = groups;
+    else delete config.hooks[event];
+  }
   if (isTracked(root, ".codex/hooks/claude-plan-gate.js")) {
-    record(`${rel} (plan hook)`, null, ".codex/hooks/claude-plan-gate.js is tracked by git, so the plan handoff hook isn't added; ask Claude to confirm the implementer yourself");
+    record(`${rel} (plan hook)`, null, ".codex/hooks/claude-plan-gate.js is tracked by git, so the plan handoff hook isn't added; remove the tracked legacy script in a team change, then rerun setup to enable automatic routing");
   } else {
     const command = "node -e \"const p=require('path').join(process.env.CLAUDE_PROJECT_DIR||process.cwd(),'.codex','hooks','claude-plan-gate.js');require('fs').existsSync(p)?require(p):console.log('{}')\"";
     const groups = (config.hooks.PostToolUse = config.hooks.PostToolUse || []);
@@ -576,6 +586,7 @@ function localPaths(root) {
     ".codex/hooks/claude-verify.js",
     ".codex/hooks/workflow-lib.js",
     ".codex/hooks/claude-plan-gate.js",
+    ".codex/hooks/claude-completion-gate.js",
     ...(isTracked(root, ".codex/hooks.json") ? [] : [".codex/hooks.json"]),
     "CLAUDE.local.md",
     ".claude/settings.local.json",
@@ -690,7 +701,7 @@ function setupProject(root, graphify, mode) {
   // A Codex-only project has no Claude: its CLAUDE.local.md and settings are left as they are.
   if (mode !== "codex") {
     mergeSection(root, "CLAUDE.local.md", render("CLAUDE.workflow.md"), "## Workflow");
-    mergeClaudeSettings(root, graphify, guards);
+    mergeClaudeSettings(root, graphify, guards, mode);
   }
   mergeProjectHooks(root, mode);
   updateExclude(root);
@@ -819,7 +830,8 @@ phase, and asks you before every commit.`,
      taste-skill and caveman plugins) and check /mcp for playwright and playwright-headed. In Codex,
      trust the plugin hooks (/hooks) and start a new thread.
 Then keep a Codex session open in this repo and plan a task with Claude. Claude routes it by
-task type; for Codex it sends the plan to that session itself and reviews the result.`,
+task type; it resumes that session automatically so you see output, and requires a final Codex code audit.
+With no open session it uses headless Codex. It never asks you to paste a handoff.`,
   ];
 }
 
@@ -833,8 +845,8 @@ async function main() {
     }
     return;
   }
-  if (flag("--claude-only") && flag("--codex-only")) {
-    console.error("Choose one: --claude-only or --codex-only (neither sets up both agents).");
+  if (["--dual", "--claude-only", "--codex-only"].filter(flag).length > 1) {
+    console.error("Choose one: --dual, --claude-only or --codex-only.");
     process.exitCode = 1;
     return;
   }

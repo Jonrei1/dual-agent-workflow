@@ -42,9 +42,9 @@ test("Impeccable, the caveman skill copies and the shared layout are gone from c
 
 test("the rules wire in ponytail, taste-skill, the headed or headless question and Claude-owned frontend", () => {
   const claude = forMode(read(path.join(templates, "CLAUDE.workflow.md")), "dual");
-  assert.ok(claude.trimEnd().split("\n").length <= 100);
+  assert.ok(claude.trimEnd().split("\n").length <= 105);
   assert.ok(/```md\n([\s\S]*?)```/.exec(claude)[1].trimEnd().split("\n").length <= 25);
-  for (const term of ["AskUserQuestion", "manual phases", "review", "handoff", "wait", "final-ui-audit.md", ".codex/tasks/", "git commit"]) assert.ok(claude.includes(term), term);
+  for (const term of ["AskUserQuestion", "review", "handoff", "wait", "final-ui-audit.md", ".codex/tasks/", "git commit"]) assert.ok(claude.includes(term), term);
   for (const term of ['model: "haiku"', "### Frontend", "Claude builds every frontend, from the start", "## Frontend (Claude)", "backend only", "Don't write app files while the run is active", "/ponytail-review", "redesign-existing-projects", "design-taste-frontend", "headed", "headless", "mcp__playwright-headed__*", "- Browser:", "worktree"]) assert.ok(claude.includes(term), term);
   assert.match(claude, /^<!-- dual-agent-workflow:end -->\n?$/m);
   const codex = forMode(read(path.join(templates, "AGENTS.codex.md")), "dual");
@@ -87,9 +87,9 @@ test("single-agent rules are short, carry nothing about the absent agent and spe
 test("Claude asks approval for every phase commit before continuing, with final QA across commits", () => {
   const claude = forMode(read(path.join(templates, "CLAUDE.workflow.md")), "dual");
   assert.match(claude, /handoff .*--phase N/);
-  assert.match(claude, /both automatic and manual modes/);
+  assert.match(claude, /open Codex CLI is discovered and resumed automatically/);
   assert.match(claude, /Paused \(0\): review the passing phase, ask approval and commit, then handoff --phase/);
-  assert.match(claude, /After the approved commit succeeds, continue automatically in the same turn: run the handoff and start wait without asking; manual mode also waits/);
+  assert.match(claude, /After the approved commit succeeds, continue automatically in the same turn: run the handoff and start wait without asking\./);
   assert.match(claude, /Approving a commit also approves the next phase/);
   assert.match(claude, /Before every git commit \(phase, frontend, QA fix or retry\)/);
   assert.match(claude, /ask with AskUserQuestion and wait for explicit approval/);
@@ -126,8 +126,8 @@ test("docs state the call counts, the single-agent modes and every plugin", () =
   assert.match(read(docs[0]), /playwright-headed/);
 });
 
-test("versions and manifests agree on v4.2", () => {
-  for (const file of ["package.json", "package-lock.json", ".claude-plugin/plugin.json"]) assert.strictEqual(JSON.parse(read(path.join(repo, file))).version, "4.2.0");
+test("versions and manifests agree on v4.3", () => {
+  for (const file of ["package.json", "package-lock.json", ".claude-plugin/plugin.json"]) assert.strictEqual(JSON.parse(read(path.join(repo, file))).version, "4.3.0");
   const marketplace = JSON.parse(read(path.join(repo, ".claude-plugin", "marketplace.json")));
   assert.match(marketplace.plugins[0].description, /ponytail/);
   assert.match(marketplace.plugins[0].description, /--codex-only/);

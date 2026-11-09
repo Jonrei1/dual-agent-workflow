@@ -143,7 +143,7 @@ flowchart TD
 | Component | Responsibility |
 |---|---|
 | **Claude Code** (Interactive) | Planning, task routing, UI implementation, Playwright browser audits, final QA pass, commit approvals. |
-| **Codex CLI** (Interactive) | Backend logic, APIs, data processing, and standalone functions per phase handoff. Never touches UI. |
+| **Codex CLI** (Interactive preferred) | Backend implementation and the required read-only whole-task code audit, including frontend review. |
 | **Headless Claude** (Read-Only) | Verification step grading Codex's implementation against plan acceptance criteria. |
 | **ponytail** | Senior developer and QA reviewer plugin enforcing minimal diffs and clean architecture. |
 | **taste-skill** | UI/UX design direction for clean interfaces when Claude builds frontends. |
@@ -158,13 +158,13 @@ flowchart TD
 
 1. **Describe the task** to Claude Code.
    - Claude inspects the codebase with `/graphify` and creates a phased plan.
-   - Claude asks who implements: **Codex (default)**, **Claude directly**, or **Codex (manual phases)**.
+   - Claude routes backend work to Codex and frontend work to itself automatically, without a handoff question.
    - For UI tasks, Claude asks whether to run browser audits **headed** (visible window) or **headless**.
 2. **Plan Validation**:
    - Plan is saved to `.codex/plans/<task>.md` and verified with `autopilot.js check`.
    - Backend phases are strictly decoupled from frontend deliverables.
 3. **Phase Execution (Codex)**:
-   - Claude queues Phase 1 to your open Codex session via `codex queue`.
+   - Claude records the baseline and queues Phase 1 to your open Codex CLI via `codex queue --resume`, so you can watch it work. With no open session, it runs Codex headlessly. Connection errors are reported rather than starting duplicate work.
    - Codex implements the phase inside the defined scope.
    - Automated test gates and project checks execute locally.
 4. **Alignment Verification**:
@@ -177,7 +177,8 @@ flowchart TD
    - Claude builds the frontend per UI specifications.
    - Claude audits the UI with Playwright across specified viewports and fixes defects.
 7. **Final QA & Summary**:
-   - Claude executes `/ponytail-review` across the full diff.
+   - Claude executes `/ponytail-review` across the full diff, then calls `autopilot.js audit PLAN`.
+   - Codex performs a required read-only code audit in the open terminal (or headless fallback), including committed phases and frontend work. Backend fixes return to Codex automatically; Claude fixes frontend findings. A current PASS is required before completion.
    - A task summary is generated in `.codex/tasks/<date>-<task>.md`.
 
 ---
@@ -205,9 +206,7 @@ Configure project checks and verification behavior in `.codex/verify.json`:
     "viewports": [375, 1280],
     "headed": false
   },
-  "handoff": {
-    "waitSeconds": 90
-  }
+  "handoff": {}
 }
 ```
 
@@ -215,7 +214,7 @@ Configure project checks and verification behavior in `.codex/verify.json`:
 - `parallelChecks`: Set to `false` if test runners conflict when run concurrently.
 - `alignment.riskPaths`: Glob patterns triggering Opus alignment instead of Sonnet.
 - `ui`: Dev server command, URL, viewports, and default browser mode.
-- `handoff.waitSeconds`: Maximum timeout when dispatching tasks to Codex.
+- `handoff.thread`: Optional explicit session to use; normally the open session in this repository is discovered automatically. Omit the handoff block unless pinning a session.
 
 Verify detected checks at any time:
 ```sh
@@ -226,7 +225,7 @@ node .codex/hooks/claude-verify.js --print-checks
 
 ## Cost of a Run
 
-- **Dual-agent mode**: Requires **(phases + reworks)** read-only headless Claude alignment calls per task. There are **no headless UI calls** (Claude audits its own frontend directly in your interactive session).
+- **Dual-agent mode**: Requires **(phases + reworks)** read-only headless Claude alignment calls per task, plus a final Codex code audit and any audit reworks. There are **no headless UI calls** (Claude audits its own frontend directly in your interactive session).
 - **Single-agent modes**:
   - `--codex-only`: **1 + reworks** read-only `codex exec` alignment calls per task (on the final phase).
   - `--claude-only`: 0 headless verification calls.
@@ -247,7 +246,7 @@ node .codex/hooks/claude-verify.js --print-checks
 
 | Problem | Solution |
 |---|---|
-| **Codex does not receive queued plans** | Ensure Codex CLI is running in the repository directory. Check that your Codex CLI is up to date (`npm i -g @openai/codex`). |
+| **Codex does not receive work** | Check the saved workflow mode. Use setup with `--dual --project-only` to restore both agents, then restart Claude. Open sessions are discovered in the repo or a subfolder and resumed automatically. Inspect queue logs for connection/resume errors. |
 | **Playwright browser missing / failed audit** | Run `/dual-agent-workflow:setup --yes --tools-only` to ensure Chromium and Playwright MCP are installed. |
 | **Headed browser fails to open on Linux** | Ensure a display server is running (`DISPLAY` or `WAYLAND_DISPLAY` set), or configure `"headed": false` in `.codex/verify.json`. |
 | **Checks fail concurrently** | Set `"parallelChecks": false` in `.codex/verify.json`. |

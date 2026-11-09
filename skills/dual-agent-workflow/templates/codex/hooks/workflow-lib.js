@@ -305,7 +305,7 @@ function planChecklist(repoRoot, slug, text) {
   add(["normal", "high"].includes(meta.risk), "frontmatter risk is normal or high", meta.risk || "(missing)");
   add(["none", "codex"].includes(meta.review || "none"), "frontmatter review is none or codex", meta.review || "");
   add(["yes", "no"].includes(meta.ui), "frontmatter ui is yes or no", meta.ui || "(missing)");
-  add(phases.length > 0, "has `## Phase <N>: <title>` sections");
+  add(phases.length > 0 || (!codexOnly && workflowMode(repoRoot) === "dual" && meta.ui === "yes" && frontendSpec(text)), "has phases or a frontend-only UI plan");
 
   const ids = acceptanceIds(text);
   add(ids.length > 0, "acceptance items have ids (`- A1: ...`)");
@@ -423,7 +423,7 @@ function claudeArgs(repoRoot, { prompt, model, effort, allowed, denied = [], mcp
   const { settingSources } = headlessConfig(repoRoot);
   if (settingSources) args.push("--setting-sources", String(settingSources));
   // The variadic flags go last so they can't swallow another option.
-  args.push("--allowedTools", ...allowed);
+  if (allowed.length) args.push("--allowedTools", ...allowed);
   if (denied.length) args.push("--disallowedTools", ...denied);
   return { command: claude.command, args };
 }
@@ -831,7 +831,12 @@ function samePath(a, b) {
 // other than "user").
 function pickCodexSession(threads, repoRoot) {
   const matches = (threads || [])
-    .filter((thread) => thread && thread.id && thread.cwd && samePath(thread.cwd, repoRoot))
+    .filter((thread) => {
+      if (!thread?.id || !thread.cwd) return false;
+      if (samePath(thread.cwd, repoRoot)) return true;
+      const root = gitOut(thread.cwd, ["rev-parse", "--show-toplevel"]);
+      return Boolean(root) && samePath(root, repoRoot);
+    })
     .filter((thread) => thread.source !== "exec" && !thread.parentThreadId && !thread.ephemeral)
     .filter((thread) => !thread.threadSource || thread.threadSource === "user")
     .map((thread) => ({
@@ -842,7 +847,7 @@ function pickCodexSession(threads, repoRoot) {
       name: thread.name || "",
       at: thread.recencyAt || thread.updatedAt || thread.createdAt || 0,
     }))
-    .sort((a, b) => b.at - a.at);
+    .sort((a, b) => Number(b.source === "cli") - Number(a.source === "cli") || b.at - a.at);
   return { session: matches[0] || null, others: matches.slice(1) };
 }
 
@@ -885,6 +890,9 @@ async function findCodexSession(repoRoot, options = {}) {
 // Windows starts codex through a .cmd shim, which needs a shell. Arguments are quoted, and
 // the messages the workflow sends contain no shell metacharacters.
 function runCodex(repoRoot, commandArgs, options = {}) {
+  if (isWindows && commandArgs.some((arg) => /["&|<>^%!\r\n]/.test(arg))) {
+    return { status: 1, stderr: "Unsafe shell characters in Codex arguments; pass long prompts through stdin or a local request file." };
+  }
   const quote = (arg) => (/[\s()]/.test(arg) ? `"${arg}"` : arg);
   return spawnSync(isWindows ? ["codex", ...commandArgs].map(quote).join(" ") : "codex", isWindows ? [] : commandArgs, {
     cwd: repoRoot,
@@ -933,6 +941,7 @@ module.exports = {
   runShellAsync,
   killTree,
   workflowPaths,
+  readJsonFile,
   fileHash,
   workflowMode,
   forMode,

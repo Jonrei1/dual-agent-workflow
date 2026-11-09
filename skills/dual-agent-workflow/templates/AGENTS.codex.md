@@ -43,7 +43,8 @@ Before editing, record HEAD and staged/unstaged changes in .codex/tasks/<slug>-b
 <!-- /only -->
 ### Full plan execution
 1. Run `node .codex/autopilot.js check .codex/plans/<task>.md`. Exit 1: report the problems.
-2. Run `node .codex/autopilot.js begin .codex/plans/<task>.md`. It snapshots the untouched
+2. If the same task already has a baseline in status.json, preserve it. Otherwise run
+   `node .codex/autopilot.js begin .codex/plans/<task>.md`. It snapshots the untouched
    tree and records every gate/check as the failure baseline. Report a failure and stop.
 3. For each phase in document order (including intermediate ids such as 2.5):
    - Run `node .codex/autopilot.js phase .codex/plans/<task>.md <N>`.
@@ -106,6 +107,11 @@ Run existing Playwright specs when gates/checks name them. The helper owns the b
 
 Frontend work is Claude's: leave it alone, and expose what it needs (endpoints, types, data,
 errors) exactly as the last phase's Hands off describes.
+
+### Final code audit
+When asked for a read-only code audit, review all task changes including frontend files.
+Return the requested verdict and evidence in the terminal; do not edit files or call audit recursively.
+Implementation ownership restrictions above do not exclude frontend files from review.
 
 ### Plan review
 Plan review is performed before handoff by `autopilot.js review`, using read-only Codex.

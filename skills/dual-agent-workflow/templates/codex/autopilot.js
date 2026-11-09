@@ -3,15 +3,14 @@
 
 // Autopilot: run an approved plan end to end, handed to Codex automatically.
 //
-// Claude saves the plan to .codex/plans/<slug>.md, runs `check`, then `handoff`, which posts
-// `Execute .codex/plans/<slug>.md ...` into the Codex session open in this repo (found through
-// the Codex app-server; it waits for one, else prints the line to paste). Claude then runs
-// `wait` in the background and reviews the result when the run ends. Codex (following
-// .codex/workflow/CODEX.md "Full plan execution") calls the other steps from its own session:
+// Claude records the task baseline, then runs handoff in the background. It starts
+// the open Codex terminal automatically; no session means headless fallback.
+// Interactive Codex calls phase/verify/close; the host owns those in headless fallback. Claude builds frontend,
+// then audit reviews the whole task through a separate read-only Codex call.
 //
 //   node .codex/autopilot.js check   .codex/plans/<slug>.md      planning checklist (exit 1 if not runnable)
-//   node .codex/autopilot.js handoff .codex/plans/<slug>.md      send the plan to Codex [--phase N] [--continue]
-//                                                                 [--thread <id>] [--wait <s>] [--print]
+//   node .codex/autopilot.js handoff .codex/plans/<slug>.md      use the open Codex CLI, or headless fallback [--phase N] [--continue]
+//                                                                 [--thread <id>] [--print]
 //   node .codex/autopilot.js wait    .codex/plans/<slug>.md      block until the run is done, stuck or failed
 //   node .codex/autopilot.js begin   .codex/plans/<slug>.md      start snapshot, status "running"
 //   node .codex/autopilot.js review  .codex/plans/<slug>.md      read-only Codex plan review before handoff
@@ -22,7 +21,7 @@
 //
 // Exit codes: 0 ok / PASS, 1 failed, 2 gate failed (fix and verify again),
 // 3 NEEDS REWORK (read .codex/verify/<slug>/alignment.md, fix, verify again), 4 stuck (stop),
-// 5 handoff couldn't reach Codex (paste the printed line), 6 wait timed out.
+// 5 explicit --print output, 6 wait timed out.
 //
 // `begin` records a baseline: every gate and check run on the untouched starting tree. A gate
 // or check that later fails only with errors from that baseline doesn't block the run.
@@ -56,7 +55,7 @@ for (let i = 0; i < args.length; i++) {
   else if (valueFlags.has(name) && args[i + 1] !== undefined) flagValues[name] = args[++i];
 }
 const flagValue = (name) => flagValues[name] || "";
-const commands = ["check", "review", "handoff", "wait", "begin", "phase", "verify", "stop", "close"];
+const commands = ["check", "review", "audit", "handoff", "wait", "begin", "phase", "verify", "stop", "close"];
 const command = commands.includes(positional[0]) ? positional.shift() : flags.has("--dry-run") ? "check" : "";
 const [planArg, phaseArg] = positional;
 const repoRoot = path.resolve(__dirname, "..");
@@ -157,7 +156,9 @@ function taskFileRel(name) {
 // hits the run lock can see whose run it is.
 function currentOwner() {
   const email = lib.gitOut(repoRoot, ["config", "user.email"]);
-  return `${email || "unknown git user"} (${os.userInfo().username}@${os.hostname()})`;
+  let username = process.env.USERNAME || process.env.USER || "unknown";
+  try { username = os.userInfo().username; } catch { /* Restricted Windows accounts may have no passwd entry. */ }
+  return `${email || "unknown git user"} (${username}@${os.hostname()})`;
 }
 
 function readPlan() {
@@ -271,6 +272,89 @@ ${plan.text}`;
   console.log(`\nPLAN REVIEW: ${reviewed.verdict}`);
 }
 
+const auditSchema = {
+  type: "object", properties: {
+    verdict: { type: "string", enum: ["PASS", "NEEDS REWORK"] },
+    findings: { type: "array", items: { type: "object", properties: {
+      owner: { type: "string", enum: ["Codex", "Claude"] },
+      problem: { type: "string" }, evidence: { type: "string" }, proposedFix: { type: "string" },
+    }, required: ["owner", "problem", "evidence", "proposedFix"], additionalProperties: false } },
+  }, required: ["verdict", "findings"], additionalProperties: false,
+};
+
+async function runCodeAudit(prompt) {
+  const pinned = flagValue("--thread") || lib.verifyConfig(repoRoot).handoff?.thread;
+  const found = pinned ? { session: { id: pinned } } : await lib.findCodexSession(repoRoot);
+  if (found.error) throw new Stop("failed", `Cannot reach the open Codex terminal for audit: ${found.error}`);
+  if (!found.session) {
+    console.log("No Codex session is open in this repo; running the read-only audit headlessly.");
+    return lib.runCodexJson(repoRoot, { prompt, schema: auditSchema, dir: lib.taskVerifyDir(repoRoot, slug), name: "code-audit", timeout: callTimeoutMs, env: childEnv });
+  }
+  const token = require("node:crypto").randomUUID();
+  const request = taskFile("code-audit-request.md");
+  fs.writeFileSync(request, `${prompt}\nReturn your final answer as AUDIT ${token} followed by one JSON object matching this schema, without Markdown fences:\n${JSON.stringify(auditSchema)}\nDo not run autopilot audit recursively. Do not write any file, including reports.\n`);
+  const message = `Perform the read-only code audit described in ${taskFileRel("code-audit-request.md")}. Return the requested AUDIT token and JSON in this terminal. Do not edit any file.`;
+  const queued = runCodex(["queue", "--thread", found.session.id, "--message", message, "--resume"]);
+  saveOutput("audit-queue", queued);
+  if (queued.error || queued.status !== 0 || /^Error:|failed to resume|resume failed|could not resume/im.test(`${queued.stdout || ""}\n${queued.stderr || ""}`)) throw new Stop("failed", "Could not queue and resume the audit in the open Codex session; no duplicate headless audit was started.");
+  console.log(`Code audit running visibly in Codex session ${describeSession(found.session)}.`);
+  const deadline = Date.now() + callTimeoutMs;
+  while (Date.now() < deadline) {
+    const state = await lib.codexThreadState(found.session.id);
+    const marker = `AUDIT ${token}`;
+    if (state.lastMessage?.includes(marker)) {
+      const answer = state.lastMessage.slice(state.lastMessage.indexOf(marker) + marker.length).trim();
+      let structured;
+      try { structured = JSON.parse(answer); } catch { /* Invalid answers fail closed below. */ }
+      return { status: 0, text: state.lastMessage, structured };
+    }
+    if (["notLoaded", "missing", "systemError"].includes(state.status)) throw new Stop("failed", `Codex audit terminal became ${state.status}.`);
+    if (state.error) throw new Stop("failed", `Codex audit connection failed: ${state.error}`);
+    await new Promise((resolve) => setTimeout(resolve, waitTiming.pollMs));
+  }
+  throw new Stop("failed", "Codex audit timed out; inspect its terminal before retrying.");
+}
+
+async function cmdAudit() {
+  if (lib.workflowMode(repoRoot) !== "dual") throw new Usage("audit is required only in dual-agent mode; single-agent verification is unchanged.");
+  const plan = readPlan();
+  assertPlanValid(plan);
+  if (status.slug !== slug || !lib.treeExists(repoRoot, status.startTree)) throw new Usage("Run begin before any task edits so the audit includes all phases.");
+  if (Object.entries(gateInputs()).some(([key, hash]) => status.inputs?.[key] !== hash)) throw new Usage("Plan or verify.json changed since begin; resolve the task baseline before auditing.");
+  if (plan.phases.some((phase) => status.phases?.[phase.id]?.verdict !== "PASS")) throw new Usage("Every backend phase must pass verification before the final audit.");
+  const current = snapshot();
+  const head = lib.gitOut(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+  const index = lib.gitOut(repoRoot, ["diff", "--cached", "--binary"]);
+  const previous = readJson(taskFile("code-audit.json"));
+  if (previous?.verdict === "PASS" && previous.base === status.startTree && previous.tree === current && previous.planHash === gateInputs()["the plan"] && previous.configHash === gateInputs()["verify.json"]) {
+    console.log("CODE AUDIT: PASS (current snapshot already reviewed)");
+    return 0;
+  }
+  if ((status.auditAttempts || 0) >= maxReworks + 1) throw new Stop("stuck", "Code audit still needs rework after two retries; see code-audit.md.");
+  const gate = await runGates({ id: "final", gates: plan.phases.flatMap((phase) => phase.gates) });
+  if (!gate.ok) throw new Stop("failed", `Final checks failed: ${gate.gate}\n${gate.summary}`);
+  if (plan.meta.ui === "yes" && !/^UI AUDIT:\s*PASS\s*$/m.test(readFile(taskFile("final-ui-audit.md")))) throw new Usage("Complete the Playwright UI audit and write UI AUDIT: PASS in final-ui-audit.md before the code audit.");
+  const diff = lib.diffText(repoRoot, status.startTree, current);
+  fs.mkdirSync(lib.taskVerifyDir(repoRoot, slug), { recursive: true });
+  fs.writeFileSync(taskFile("task.diff"), diff);
+  fs.rmSync(taskFile("code-audit.json"), { force: true });
+  setStatus({ auditAttempts: (status.auditAttempts || 0) + 1 });
+  const result = await runCodeAudit(`Independently audit the entire implementation against ${planRel}. Read the plan, ${taskFileRel("task.diff")} and relevant source files. The diff covers all task phases, including committed backend work and Claude frontend work, and excludes pre-existing user changes. Do not edit files, commit or run commands that modify the project. Report only concrete defects with file:line evidence and failing scenarios, including security, correctness and missing risky tests. Assign backend/functions/scraping fixes to Codex and frontend fixes to Claude. No style findings. All findings require fixes; return PASS only with no findings. Checks already ran. Baseline failures: ${gate.preexisting.join(", ") || "none"}.`);
+  saveOutput("code-audit", { stdout: result.text });
+  const reviewed = result.structured;
+  const valid = !result.error && result.status === 0 && ["PASS", "NEEDS REWORK"].includes(reviewed?.verdict) && Array.isArray(reviewed.findings)
+    && reviewed.findings.every((item) => item && ["Codex", "Claude"].includes(item.owner) && ["problem", "evidence", "proposedFix"].every((key) => typeof item[key] === "string" && item[key].trim()));
+  if (!valid) throw new Stop("failed", "Codex code audit failed or returned invalid findings; see the code-audit output log. No passing audit was recorded.");
+  const unchanged = snapshot() === current && lib.gitOut(repoRoot, ["rev-parse", "--verify", "HEAD"]) === head && lib.gitOut(repoRoot, ["diff", "--cached", "--binary"]) === index;
+  const verdict = reviewed.verdict === "PASS" && !reviewed.findings.length && unchanged ? "PASS" : "NEEDS REWORK";
+  const report = { ...reviewed, verdict, base: status.startTree, tree: current, planHash: gateInputs()["the plan"], configHash: gateInputs()["verify.json"], at: new Date().toISOString() };
+  fs.writeFileSync(taskFile("code-audit.json"), JSON.stringify(report, null, 2) + "\n");
+  fs.writeFileSync(taskFile("code-audit.md"), `# Codex code audit\n\n${reviewed.findings.map((item) => `- ${item.owner}: ${item.problem}\n  Evidence: ${item.evidence}\n  Fix: ${item.proposedFix}`).join("\n")}\n${unchanged ? "" : "Working tree changed during audit; review again.\n"}\nCODE AUDIT: ${verdict}\n`);
+  setStatus({ auditVerdict: verdict });
+  console.log(readFile(taskFile("code-audit.md")));
+  return verdict === "PASS" ? 0 : exitCodes.rework;
+}
+
 // Codex builds the backend, functions and scraping (non-UI only). Claude builds the frontend after the run and audits it itself
 // with Playwright (headless or headed, as the plan's `- Browser:` says), so close has no UI
 // step: it only refreshes the graph.
@@ -296,8 +380,8 @@ function printChecklist(plan) {
 
 function usage() {
   console.error(`usage:
-  node .codex/autopilot.js check|review|begin|close .codex/plans/<slug>.md
-  node .codex/autopilot.js handoff .codex/plans/<slug>.md [--phase N | --continue] [--thread <id>] [--wait <seconds>] [--print]
+  node .codex/autopilot.js check|review|audit|begin|close .codex/plans/<slug>.md
+  node .codex/autopilot.js handoff .codex/plans/<slug>.md [--phase N | --continue] [--thread <id>] [--print]
   node .codex/autopilot.js wait .codex/plans/<slug>.md [--since <iso>] [--timeout <seconds>]
   node .codex/autopilot.js phase|verify .codex/plans/<slug>.md <N>
   node .codex/autopilot.js stop .codex/plans/<slug>.md --reason "<why>"`);
@@ -312,7 +396,7 @@ function findPhase(id) {
 
 // Codex-driven steps are separate processes that share .codex/autopilot/status.json.
 function requireActive() {
-  if (status.slug !== slug || !["running", "paused", "stuck", "failed"].includes(status.state)) {
+  if (status.slug !== slug || !["running", "paused", "stuck", "failed", "done"].includes(status.state)) {
     throw new Usage(`no active run for ${planRel}; run \`node .codex/autopilot.js begin ${planRel}\` first`);
   }
   const changed = Object.entries(gateInputs()).filter(([name, hash]) => status.inputs && status.inputs[name] !== hash).map(([name]) => name);
@@ -328,18 +412,18 @@ function gateInputs() {
   return { "the plan": lib.fileHash(path.join(repoRoot, planRel)), "verify.json": lib.fileHash(path.join(repoRoot, ".codex", "verify.json")) };
 }
 
-// ---- handoff: send the plan to Codex ----
+// ---- handoff: execute the plan in headless Codex ----
 
 // No quotes, semicolons or other shell metacharacters: the message goes through cmd.exe,
 // Windows and POSIX shells unchanged.
 function handoffMessage() {
   const phase = flagValue("--phase");
   if (flags.has("--continue")) {
-    return `Continue ${planRel}: read .codex/autopilot/status.json and re-run the step that stopped, then carry on. Follow ${lib.codexRulesRel}, section ${phase ? "Single-phase handoff" : "Full plan execution"}.${phase ? ` Resume only phase ${phase} and stop after it passes so Claude can ask approval and commit.` : ""}`;
+    return `Continue ${planRel}: read .codex/autopilot/status.json and re-run the step that stopped, then carry on. Follow ${lib.codexRulesRel}, section ${phase ? "Single-phase handoff" : "Full plan execution"}.${phase ? ` Resume only phase ${phase} and stop after it passes so Claude can ask approval and commit. If code-audit.md has backend findings, run phase ${phase}, fix those findings within its scope and verify again; preserve the original task baseline.` : ""}`;
   }
   return phase
     ? `Execute phase ${phase} of ${planRel}. Follow ${lib.codexRulesRel}, section Single-phase handoff. Use phase and verify on the full-execution protocol.`
-    : `Execute ${planRel}. Follow ${lib.codexRulesRel}, section Full plan execution.`;
+    : `Execute ${planRel}. Follow ${lib.codexRulesRel}, section Full plan execution. The task baseline is already recorded; do not run begin again.`;
 }
 
 function recordHandoff(via, thread, message, session = {}) {
@@ -347,15 +431,16 @@ function recordHandoff(via, thread, message, session = {}) {
   fs.writeFileSync(handoffPath, JSON.stringify(record, null, 2) + "\n");
 }
 
-// Polls the Codex app-server until a session is open in this repo or the time runs out.
-// Returns the last lookup: { session, others } or { session: null, error }.
-async function waitForSession(seconds) {
-  const deadline = Date.now() + seconds * 1000;
-  for (; ;) {
-    const found = await lib.findCodexSession(repoRoot);
-    if (found.session || Date.now() >= deadline) return found;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(3000, Math.max(0, deadline - Date.now()))));
+function executionLock() {
+  const file = path.join(runDir, "execution.lock");
+  let lock;
+  try { lock = fs.openSync(file, "wx"); }
+  catch (error) {
+    if (error.code === "EEXIST") throw new Usage("A Codex dispatch or audit is already active. Wait for it; do not dispatch twice. If its process crashed, inspect execution.lock before removing it.");
+    throw error;
   }
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, plan: planRel }));
+  return () => { fs.closeSync(lock); fs.rmSync(file, { force: true }); };
 }
 
 function describeSession(session) {
@@ -364,11 +449,13 @@ function describeSession(session) {
 }
 
 function queueInto(thread, message, session = { id: thread }) {
-  const result = runCodex(["queue", "--thread", thread, "--message", message], { timeout: 60 * 1000, env: process.env });
+  const result = runCodex(["queue", "--thread", thread, "--message", message, "--resume"], { timeout: 60 * 1000, env: process.env });
   const output = `${result.stdout || ""}${result.stderr || ""}`.trim();
-  if (!result.error && result.status === 0 && !/^Error:/m.test(output)) {
+  saveOutput("queue", result);
+  if (!result.error && result.status === 0 && !/^Error:/m.test(output) && !/failed to resume|resume failed|could not resume/i.test(output)) {
     recordHandoff("codex queue", thread, message, session);
     console.log(`\nSent to Codex session ${describeSession(session)}:\n  ${message}`);
+    if (output) console.log(output);
     return true;
   }
   console.log(`\ncodex queue to ${thread} failed${output ? `: ${tail(output, 500)}` : ""}.`);
@@ -377,7 +464,7 @@ function queueInto(thread, message, session = { id: thread }) {
 
 async function cmdHandoff() {
   const plan = readPlan();
-  if (!flags.has("--continue") && printChecklist(plan)) {
+  if (printChecklist(plan)) {
     console.log("\nNot handed off: fix the plan until `check` is clean.");
     return exitCodes.failed;
   }
@@ -391,26 +478,51 @@ async function cmdHandoff() {
 
   const config = lib.verifyConfig(repoRoot).handoff || {};
   const pinned = flagValue("--thread") || config.thread || "";
-  if (pinned) return queueInto(pinned, message) ? 0 : paste();
-
-  // Ask the Codex app-server which sessions are open in this repo. It sees a session as soon
-  // as Codex starts, before its first message.
-  let found = await lib.findCodexSession(repoRoot);
-  if (!found.session) {
-    const seconds = Number(flagValue("--wait") || (config.waitSeconds ?? 90)) || 0;
-    if (seconds > 0) {
-      console.log(`\nNo Codex session is open in this repo. Start Codex in a terminal here (your IDE's terminal is fine) and the plan will be sent to it. Waiting up to ${seconds}s...`);
-      found = await waitForSession(seconds);
+  if (!plan.phases.length) throw new Usage("Frontend-only plan: run begin, build the frontend, then audit; no backend handoff is needed.");
+  if (flagValue("--phase")) findPhase(flagValue("--phase"));
+  const unlock = executionLock();
+  try {
+    status = readJson(statusPath) || {};
+    if (status.slug !== slug || !status.startTree) await cmdBegin();
+    else {
+      const previousState = status.state;
+      if (["failed", "stuck"].includes(previousState) && !flags.has("--continue")) throw new Usage("Resume the stopped phase with --continue; do not reset its baseline.");
+      requireActive();
     }
+    const selected = flagValue("--phase");
+    if (selected && status.phases?.[selected]?.verdict === "PASS" && !flags.has("--continue")) throw new Usage(`Phase ${selected} already passed; do not dispatch it again.`);
+    const found = pinned ? { session: { id: pinned }, others: [] } : await lib.findCodexSession(repoRoot);
+    if (found.error) throw new Stop("failed", `Cannot discover the open Codex terminal: ${found.error}. Resolve the connection before retrying; no hidden duplicate execution was started.`);
+    if (found.session) {
+      const last = readJson(handoffPath);
+      if (last?.via === "codex queue" && last.plan === planRel && last.phase === selected && status.step === "dispatched") throw new Usage("This phase is already queued in the open Codex session; run wait instead of dispatching twice.");
+      setStatus({ step: "dispatched" });
+      if (!queueInto(found.session.id, message, found.session)) throw new Stop("failed", "Codex queue dispatch failed. Inspect the queue error before retrying; no second dispatch was attempted.");
+      return 0;
+    }
+    recordHandoff("codex exec", "", message);
+    console.log(`Running Codex headlessly for ${planRel}${selected ? ` phase ${selected}` : ""}. No open panel is required.`);
+    // The host owns coordination: .codex and .git are protected in Codex's workspace sandbox.
+    for (const phase of plan.phases.filter((item) => !selected || item.id === selected)) {
+      if (!flags.has("--continue") || status.phase !== phase.id || !status.phaseBase || status.phases?.[phase.id]?.verdict === "PASS") await cmdPhase(phase.id);
+      let attempt = 0;
+      for (;;) {
+        const result = runCodex(["exec", "--sandbox", "workspace-write", "--json", "-"], {
+          input: `Implement only phase ${phase.id} of ${planRel}. Read the plan and ${lib.codexRulesRel}. HEADLESS IMPLEMENTATION: the host runner owns phase, verify, stop, close and all .codex/.git state. Do not run those coordination commands or write workflow files. Edit only the backend scope for this phase; never edit frontend. Do not commit, stage, stash or push. Do not ask for handoff. On rework read .codex/verify/${slug}/alignment.md and code-audit.md if present, and phase-${phase.id}.checks.log; fix their in-scope backend defects. Return what changed and any blocker.`,
+        });
+        const output = saveOutput(`execution-${phase.id}-${++attempt}`, result);
+        if (result.error || result.status !== 0) throw new Stop("failed", `Headless Codex failed: ${result.error?.message || `exit ${result.status}`}; see ${output}. Check CLI authentication, permissions and logs.`);
+        const verdict = await cmdVerify(phase.id);
+        if (!verdict) break;
+        if (![exitCodes.gate, exitCodes.rework].includes(verdict)) return verdict;
+      }
+    }
+    if (status.state !== "paused") await cmdClose();
+    console.log(waitSummary(status));
+    return 0;
+  } finally {
+    unlock();
   }
-  if (!found.session) {
-    console.log(found.error ? `\nCouldn't ask the Codex app-server for open sessions: ${found.error}` : "\nNo Codex session is open in this repo.");
-    return paste();
-  }
-  if (found.others.length) {
-    console.log(`\n${found.others.length + 1} Codex sessions are open in this repo; using the most recent. Others:\n${found.others.map((other) => `  ${describeSession(other)}`).join("\n")}\nPin one with --thread <id> or handoff.thread in .codex/verify.json.`);
-  }
-  return queueInto(found.session.id, message, found.session) ? 0 : paste();
 }
 
 // ---- wait: block until the run ends, then print what Claude needs to review ----
@@ -437,7 +549,7 @@ function waitSummary(current, codexMessage = "") {
   if (current.state === "paused") {
     lines.push(`\nClaude: review the passing phase and ask for explicit approval to commit it. Once the commit succeeds, run this without asking, then start wait again:\nNext phase: node .codex/autopilot.js handoff ${planRel} --phase ${current.nextPhase}`);
   } else if (current.state === "done") {
-    lines.push(`\nNext (Claude): read the reports and spot-check the diff${plan.meta.ui === "yes" ? ", then build the frontend (## Frontend (Claude)) and audit it with Playwright" : ""}, run the QA pass, then write the task summary and report to the user.`);
+    lines.push(`\nNext (Claude): read the reports and spot-check the diff${plan.meta.ui === "yes" ? ", then build the frontend (## Frontend (Claude)) and audit it with Playwright" : ""}, run the QA pass and the required autopilot.js audit, then write the task summary and report to the user.`);
   } else {
     lines.push(`\nNext (Claude): explain why it stopped. After a fix, send it back with: node .codex/autopilot.js handoff ${planRel} --phase ${current.phase || plan.phases[0].id} --continue`);
   }
@@ -569,7 +681,7 @@ async function cmdBegin() {
   assertPlanValid(plan);
   const start = snapshot();
   status = {};
-  setStatus({ slug, plan: planRel, owner: currentOwner(), state: "running", reason: "", phase: "", step: "begin", attempt: 0, startTree: start, phases: {}, inputs: gateInputs() });
+  setStatus({ slug, plan: planRel, owner: currentOwner(), state: "running", reason: "", phase: "", step: "begin", attempt: 0, startTree: start, phases: {}, inputs: gateInputs(), startedAt: new Date().toISOString() });
   log(`=== autopilot start (Codex-driven): ${planRel}`);
   if (lib.changedFiles(repoRoot, lib.headTree(repoRoot) || start, start).length) {
     log("note: the working tree already had uncommitted changes; they're part of the starting snapshot and won't be reviewed");
@@ -577,14 +689,14 @@ async function cmdBegin() {
   await recordBaseline(plan, start);
   setStatus({ step: "begun" });
   console.log(`\nPhases, in order: ${plan.phases.map((phase) => phase.id).join(", ")}`);
-  console.log(`Next: node .codex/autopilot.js phase ${planRel} ${plan.phases[0].id}`);
+  console.log(plan.phases.length ? `Next: node .codex/autopilot.js phase ${planRel} ${plan.phases[0].id}` : `Next: Claude builds the frontend, runs Playwright, then node .codex/autopilot.js audit ${planRel}`);
 }
 
 
-async function cmdPhase() {
+async function cmdPhase(id = phaseArg) {
   if (status.slug !== slug || !["running", "paused", "stuck", "failed"].includes(status.state)) await cmdBegin();
   requireActive();
-  const phase = findPhase(phaseArg);
+  const phase = findPhase(id);
   const phaseBase = snapshot();
   setStatus({ phase: phase.id, step: "implement", attempt: 0, gateFailures: 0, phaseBase });
   log(`--- phase ${phase.id}: ${phase.title} (starting snapshot ${phaseBase.slice(0, 7)})`);
@@ -592,9 +704,9 @@ async function cmdPhase() {
   console.log(`If you can't finish it within its scope, run: node .codex/autopilot.js stop ${planRel} --reason "<what blocks it>"`);
 }
 
-async function cmdVerify() {
+async function cmdVerify(id = phaseArg) {
   requireActive();
-  const phase = findPhase(phaseArg);
+  const phase = findPhase(id);
   if (status.phase !== phase.id || !lib.treeExists(repoRoot, status.phaseBase)) {
     throw new Usage(`phase ${phase.id} wasn't started; run \`node .codex/autopilot.js phase ${planRel} ${phase.id}\` first`);
   }
@@ -646,6 +758,7 @@ function cmdStop() {
 
 async function cmdClose() {
   requireActive();
+  if (readPlan().phases.some((phase) => status.phases?.[phase.id]?.verdict !== "PASS")) throw new Usage("Cannot close: every phase must pass verification first.");
   const result = await close();
   if (result) return result;
   setStatus({ state: "done", step: "done", phase: "" });
@@ -672,14 +785,17 @@ async function main() {
   }
 
   fs.mkdirSync(runDir, { recursive: true });
-  if (command === "handoff" || command === "wait") {
-    process.exitCode = command === "handoff" ? await cmdHandoff() : await cmdWait();
+  if (command === "wait") {
+    process.exitCode = await cmdWait();
     return;
   }
 
   logPath = path.join(runDir, `${slug}.log`);
   status = readJson(statusPath) || {};
-  const steps = { begin: cmdBegin, review: cmdReview, phase: cmdPhase, verify: cmdVerify, stop: cmdStop, close: cmdClose };
+  const steps = { begin: cmdBegin, review: cmdReview, audit: async () => {
+    const unlock = executionLock();
+    try { return await cmdAudit(); } finally { unlock(); }
+  }, handoff: cmdHandoff, phase: cmdPhase, verify: cmdVerify, stop: cmdStop, close: cmdClose };
   try {
     process.exitCode = (await steps[command]()) || 0;
   } catch (error) {

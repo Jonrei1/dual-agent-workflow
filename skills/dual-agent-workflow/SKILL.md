@@ -3,7 +3,7 @@ name: dual-agent-workflow
 description: >
   Set up the Claude + Codex workflow in a new or existing Git project, or a single-agent
   version for Claude alone (--claude-only) or Codex alone (--codex-only): install tools, local
-  rules, checks and the Codex queue handoff, plus the ponytail (senior dev and QA), taste-skill
+  rules, checks, automatic Codex execution and a required final code audit, plus the ponytail (senior dev and QA), taste-skill
   (UI/UX) and caveman (terse replies) plugins and graphify's skill and guard hooks. One
   execution driver, gates and checks before alignment, and one final Playwright UI audit that
   is headless or headed. Use for workflow installation, configuration and orchestrator handoff
@@ -14,15 +14,15 @@ description: >
 
 Daily operation is documented in [README](../../README.md#daily-use-what-happens-during-a-task).
 Installed CLAUDE.local.md and .codex/workflow/CODEX.md own the agent instructions.
-There is one driver: the open Codex session reached by codex queue. Verify runs gates and
+The driver uses the open Codex CLI through codex queue --resume so its output is visible; only with no open session does it use headless codex exec. Verify runs gates and
 project checks first, then one report-only alignment call. Close updates graphify;
 interactive Claude uses handoff --phase N, reviews each passing phase and asks for explicit commit approval, then automatically
-commits and hands off the next after approval (manual mode also waits before handoff). It records base HEAD and checkpoint SHAs
+commits and hands off the next after approval (handoffs never require separate approval). It records base HEAD and checkpoint SHAs
 in the task summary, preserves unrelated staged/unstaged work, and never stashes or pushes.
 Final QA covers the full diff from base HEAD, including committed phases; frontend and QA fixes
 get separate checked commits, each requiring fresh approval, including retries. Pending/rejected
 approval or failed commits block continuation; empty phases need no commit.
-Headless Claude calls = (phases + reworks) alignment calls, and no UI calls.
+Headless Claude calls = (phases + reworks) alignment calls, and no UI calls. Dual mode also requires one final Codex code audit plus any audit reworks. The host runner owns workflow-state writes during headless fallback so Codex keeps its workspace sandbox.
 Roles: Codex builds the backend, standalone functions and web scraping (a plan's phases never include frontend files), and Claude routes each plan to it by task type without asking. Claude builds
 every frontend itself from the start, after Codex finishes, and audits it with Playwright
 against the plan's `## UI audit`, so there is no Codex-builds-then-Claude-fixes rework.
@@ -80,7 +80,7 @@ for user scope; global scope uses system pip. See README for machine prerequisit
 | Flag | Meaning |
 |---|---|
 | --yes | Approve missing machine tools, Playwright setup, graphify skills and the plugins |
-| --claude-only, --codex-only | Set up one agent only (default both); kept until the other flag is given |
+| --dual, --claude-only, --codex-only | Explicitly select both agents or one agent (default both); kept until the other flag is given |
 | --dry-run | Print actions without installation or writes |
 | --tools-only | Machine setup only |
 | --project-only | Project setup only; no tools/browser/MCP/plugin installation |
@@ -96,6 +96,12 @@ section, deletes files an earlier version installed that this one dropped (recor
 .codex/workflow-manifest.json), and refreshes the plan template while unedited. After a plugin
 update, the SessionStart hook runs install.js --sync in projects that have a manifest (and in
 their linked git worktrees), so no re-run is needed.
+
+To restore both agents after a single-agent setup, run setup with `--dual --project-only`; re-running without a mode flag intentionally keeps the saved mode.
+
+### Required final audit (dual mode)
+
+Run begin before edits, including frontend-only plans. After backend, frontend, checks and Playwright, run `node .codex/autopilot.js audit PLAN` automatically. Codex reviews the full task in the open CLI (headless fallback only when none is open). Read code-audit.md, send backend fixes to Codex with --continue, fix frontend findings in Claude, and repeat within the two-rework limit. Never ask for a handoff. SessionStart/Stop checks prevent completion without a passing audit for the current snapshot. A failed/stuck task is reported as blocked, not complete.
 
 ### Project files
 
@@ -114,7 +120,7 @@ through git. See the [upgrade notes](../../README.md#upgrading).
 | codex/hooks.json | .codex/hooks.json | --codex-only: merge the SessionStart rules hook when untracked; always drop old graphify guards |
 | plans/_template.md | .codex/plans/_template.md | Create if missing; an older unedited-or-v2 copy is backed up to _template.previous.md |
 
-Setup adds an ExitPlanMode reminder and graphify's search/read guard hooks in
+Setup adds SessionStart routing context, a Stop completion check (dual mode), an ExitPlanMode reminder and graphify's search/read guard hooks in
 .claude/settings.local.json (not in --codex-only) and reports old tracked
 workflow sections for team cleanup.
 
@@ -122,7 +128,7 @@ workflow sections for team cleanup.
 
 - Restart Claude Code so it loads local rules, the plan hook and the plugins; inspect /mcp for
   playwright and playwright-headed. In Codex, trust the plugin and workflow hooks (/hooks).
-- Sign in to Claude/Codex and keep a Codex session open in the repo.
+- Sign in to Claude/Codex and keep a Codex CLI open in the repo to see execution and audit output; no open session uses headless fallback.
 - Allow review/verify/UI close network access and long command timeouts (30 minutes).
 - Scaffold an app first if new; build the initial graph with /graphify . once code exists.
 - Check detected commands and add verify.json as needed. Project-only setup skips browser installation.
@@ -158,7 +164,8 @@ started it. The plan and verify.json are hashed at begin; changing either mid-ru
 |---|---|
 | check PLAN | Validate plan shape and runnable gates |
 | review PLAN | Read-only ephemeral Codex findings before handoff |
-| handoff PLAN [--phase N] [--continue] [--thread ID] [--wait SEC] [--print] | Post to the open Codex session, or print paste line |
+| handoff PLAN [--phase N] [--continue] [--thread ID] [--print] | Automatically use the open Codex CLI; headless fallback when none is open. --print is diagnostic only |
+| audit PLAN [--thread ID] | Required whole-task read-only Codex code audit, including committed and frontend changes |
 | wait PLAN [--since ISO] [--timeout SEC] | Watch run/session and print outcome/reports |
 | begin PLAN | Starting snapshot, failure baseline, owner and input hashes |
 | phase PLAN N | Phase snapshot; automatically begin if needed |
@@ -167,10 +174,10 @@ started it. The plan and verify.json are hashed at begin; changing either mid-ru
 | close PLAN | Graph update, then done |
 
 All commands use `node .codex/autopilot.js`. Exit codes: 0 pass/done/paused, 1 failed,
-2 gate/check failure, 3 alignment/UI rework, 4 stuck, 5 paste, 6 wait timeout.
+2 gate/check failure, 3 alignment/UI rework, 4 stuck, 5 explicit diagnostic output, 6 wait timeout.
 Single-phase handoffs pause after intermediate PASS and wait prints the next handoff command.
 Claude asks for approval and commits the passing phase, then sends that command in the same turn
-without asking to continue (except manual mode). Always show the files, diff summary and message and wait for explicit approval
+without asking to continue (without a handoff question). Always show the files, diff summary and message and wait for explicit approval
 before every commit; prior approval never covers another commit.
 The helper and Codex never commit; a direct full-plan handoff has no intermediate Claude checkpoints.
 
@@ -183,7 +190,7 @@ The helper and Codex never commit; a direct full-plan handoff has no intermediat
 - "Newer than this plugin": update the plugin; setup and sync never downgrade a project.
 - A run says "changed after the run began": the plan or verify.json was edited; run begin again.
 - Another run is active: finish or stop it, or use a git worktree for the second task.
-- Paste fallback: keep Codex open in the repo or pin --thread; queue/app-server is experimental.
+- Codex dispatch errors: inspect the connection/authentication and execution logs; do not ask the user to paste a handoff. No automatic duplicate is started after a queue error.
 - Failed/stuck: read status/logs and .codex/verify/<task>/alignment.md, fix the blocker, then handoff --continue.
 - Browser tools missing: check /mcp for playwright and playwright-headed, and the Playwright and Chromium setup.
 - A headed window won't open: the machine has no display (Linux without DISPLAY/WAYLAND_DISPLAY); use headless.

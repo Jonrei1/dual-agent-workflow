@@ -12,6 +12,11 @@ ui: no                  # yes | no (yes: the phases build the frontend, then Cod
 
 # <Task title>
 
+<!-- only:dual -->
+Frontend-only tasks: remove all Phase sections; keep Frontend (Claude), acceptance and UI audit.
+Before edits run begin. After all work run autopilot.js audit; fix findings and repeat until PASS.
+<!-- /only -->
+
 ## Goal
 One or two sentences. What changes for the user.
 

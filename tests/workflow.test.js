@@ -336,6 +336,8 @@ test("pickCodexSession picks the newest of the user's own sessions in the repo",
   assert.strictEqual(session.status, "idle");
   assert.deepStrictEqual(others.map((other) => other.id), ["old-match"]);
   assert.strictEqual(lib.pickCodexSession(threads, path.join(repo, "..", "nowhere")).session, null);
+  const terminal = lib.pickCodexSession([...threads, liveThread("visible-terminal", repo, { source: "cli", updatedAt: 2000 })], repo);
+  assert.strictEqual(terminal.session.id, "visible-terminal", "an open CLI is preferred over a newer IDE session");
 });
 
 test("WebSocket frames round-trip at every length encoding", () => {
@@ -382,9 +384,9 @@ test("handoff --print exits 5 with the paste line", () => {
 
 // A codex stand-in (tests/fixtures/fake-codex.js) on PATH. Its app-server serves the threads
 // in threadsFile; `queue` records its arguments in argsFile.
-function fakeCodex({ threads, queueCode = 0, proxyCode = 0, review, execCode = 0 } = {}) {
+function fakeCodex({ threads, queueCode = 0, proxyCode = 0, review, execCode = 0, execute = false, audit } = {}) {
   const bin = tempDir("ccw-bin-");
-  const config = { threadsFile: path.join(bin, "threads.json"), argsFile: path.join(bin, "args.txt"), queueCode, proxyCode, review, execCode };
+  const config = { threadsFile: path.join(bin, "threads.json"), argsFile: path.join(bin, "args.txt"), queueCode, proxyCode, review, execCode, execute, audit };
   fs.writeFileSync(path.join(bin, "config.json"), JSON.stringify(config));
   if (threads) fs.writeFileSync(config.threadsFile, JSON.stringify(threads));
   const script = path.join(__dirname, "fixtures", "fake-codex.js");
@@ -411,53 +413,49 @@ test("handoff sends the plan to the Codex session open in the repo, and names it
   assert.strictEqual(handoff.source, "vscode");
 });
 
-test("handoff with no Codex session open prints the paste line instead of opening a terminal", () => {
-  const dir = workflowRepo();
-  const codex = fakeCodex({ threads: [liveThread(liveId, path.join(dir, "..", "elsewhere"))] });
-  const result = autopilot(dir, ["handoff", ".codex/plans/add-badge.md", "--wait", "0"], codex.env);
-  assert.strictEqual(result.status, 5, result.stdout + result.stderr);
-  assert.match(result.stdout, /No Codex session is open in this repo\./);
-  assert.match(result.stdout, /Paste this into Codex:\s+Execute \.codex\/plans\/add-badge\.md/);
-  assert.ok(!fs.existsSync(codex.argsFile), "nothing should be queued");
-  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/handoff.json")).via, "print");
-});
-
-test("handoff waits for Codex to be started in the repo, then sends the plan to it", async () => {
+test("handoff with no open session starts Codex headlessly and cannot pass failed alignment", () => {
   const dir = workflowRepo();
   const codex = fakeCodex();
-  const child = spawn(process.execPath, [path.join(dir, ".codex", "autopilot.js"), "handoff", ".codex/plans/add-badge.md", "--wait", "30"], {
-    cwd: dir,
-    env: { ...process.env, ...codex.env },
-  });
-  let stdout = "";
-  child.stdout.on("data", (chunk) => (stdout += chunk));
-  child.stderr.on("data", (chunk) => (stdout += chunk));
-  setTimeout(() => fs.writeFileSync(codex.threadsFile, JSON.stringify([liveThread(liveId, dir)])), 1000);
-  const status = await new Promise((resolve) => child.on("close", resolve));
-  assert.strictEqual(status, 0, stdout);
-  assert.match(stdout, /Start Codex in a terminal here/);
-  assert.match(fs.readFileSync(codex.argsFile, "utf8"), new RegExp(`queue --thread ${liveId}`));
-  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/handoff.json")).via, "codex queue");
+  const claude = fakeClaude({ verdict: "NEEDS REWORK" });
+  const env = { PATH: `${codex.env.PATH.split(path.delimiter)[0]}${path.delimiter}${claude.env.PATH}` };
+  const result = autopilot(dir, ["handoff", ".codex/plans/add-badge.md", "--phase", "1"], env);
+  assert.strictEqual(result.status, 4, result.stdout + result.stderr);
+  assert.match(result.stdout, /Running Codex headlessly/);
+  assert.match(result.stdout, /still needs rework/);
+  assert.doesNotMatch(result.stdout, /Paste this|Start Codex in a terminal/);
+  assert.ok(JSON.parse(fs.readFileSync(codex.argsFile, "utf8")).includes("workspace-write"));
+  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/handoff.json")).via, "codex exec");
 });
 
-test("handoff prints the paste line when codex queue fails", () => {
+test("a queued phase is resumed visibly and cannot be queued twice", () => {
+  const dir = workflowRepo();
+  const codex = fakeCodex({ threads: [liveThread(liveId, dir)] });
+  let result = autopilot(dir, ["handoff", ".codex/plans/add-badge.md", "--phase", "1"], codex.env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(fs.readFileSync(codex.argsFile, "utf8"), /--resume/);
+  result = autopilot(dir, ["handoff", ".codex/plans/add-badge.md", "--phase", "1"], codex.env);
+  assert.strictEqual(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /already queued/);
+});
+
+test("queue failure reports a blocker without a paste step or duplicate execution", () => {
   const dir = workflowRepo();
   const codex = fakeCodex({ threads: [liveThread(liveId, dir)], queueCode: 1 });
   const result = autopilot(dir, ["handoff", ".codex/plans/add-badge.md"], codex.env);
-  assert.strictEqual(result.status, 5, result.stdout + result.stderr);
-  assert.match(result.stdout, new RegExp(`codex queue to ${liveId} failed`));
-  assert.match(result.stdout, /Paste this into Codex:/);
-  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/handoff.json")).via, "print");
+  assert.strictEqual(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /codex queue .* failed/);
+  assert.doesNotMatch(result.stdout, /Paste this into Codex/);
+  assert.match(fs.readFileSync(codex.argsFile, "utf8"), /^queue /);
 });
 
-test("handoff explains an unreachable Codex app-server and prints the paste line", () => {
+test("unreachable app-server reports the connection error without silently running headlessly", () => {
   const dir = workflowRepo();
   const codex = fakeCodex({ proxyCode: 1 });
-  const result = autopilot(dir, ["handoff", ".codex/plans/add-badge.md", "--wait", "0"], codex.env);
-  assert.strictEqual(result.status, 5, result.stdout + result.stderr);
-  assert.match(result.stdout, /Couldn't ask the Codex app-server for open sessions: codex app-server proxy exited with 1/);
-  assert.match(result.stdout, /Paste this into Codex:/);
-  assert.ok(!fs.existsSync(codex.argsFile), "nothing should be queued");
+  const result = autopilot(dir, ["handoff", ".codex/plans/add-badge.md"], codex.env);
+  assert.strictEqual(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /Cannot discover the open Codex terminal/);
+  assert.doesNotMatch(result.stdout, /Paste this|Running Codex headlessly/);
+  assert.ok(!fs.existsSync(codex.argsFile));
 });
 
 test("wait returns when the run is done, with a summary, and 4 when it's stuck", () => {
@@ -558,6 +556,148 @@ function gateRepo(errors) {
 function step(dir, args, env = {}) {
   return autopilot(dir, [args[0], ".codex/plans/fix-label.md", ...args.slice(1)], env);
 }
+
+function completion(dir, event, session = "test-session") {
+  const result = spawnSync(process.execPath, [path.join(dir, ".codex/hooks/claude-completion-gate.js")], {
+    cwd: dir, encoding: "utf8", input: JSON.stringify({ session_id: session, ...event }),
+  });
+  assert.strictEqual(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test("automatic headless execution runs actual gates and alignment, then requires a separate code audit", () => {
+  const dir = gateRepo("");
+  const runtime = fakeCloseTools(fakeClaude());
+  const codex = fakeCodex({ execute: true });
+  const env = { ...runtime.env, PATH: `${codex.env.PATH.split(path.delimiter)[0]}${path.delimiter}${runtime.env.PATH}` };
+  completion(dir, { hook_event_name: "SessionStart" });
+  let result = step(dir, ["handoff", "--phase", "1"], env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.strictEqual(JSON.parse(read(dir, ".codex/autopilot/status.json")).state, "done");
+  assert.match(completion(dir, { hook_event_name: "Stop" }).reason, /audit/);
+  result = step(dir, ["audit"], env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.deepStrictEqual(completion(dir, { hook_event_name: "Stop" }), {});
+  assert.match(read(dir, ".codex/verify/fix-label/task.diff"), /src\/label.js/);
+  const auditArgs = JSON.parse(fs.readFileSync(codex.argsFile, "utf8"));
+  assert.strictEqual(auditArgs[auditArgs.indexOf("--sandbox") + 1], "read-only");
+});
+
+test("the final audit uses the open CLI, covers committed backend and frontend changes, and expires after edits", () => {
+  const dir = gateRepo("");
+  completion(dir, { hook_event_name: "SessionStart" });
+  assert.strictEqual(step(dir, ["begin"]).status, 0);
+  assert.strictEqual(step(dir, ["phase", "1"]).status, 0);
+  write(dir, "src/label.js", "exports.label = 'right';\n");
+  assert.strictEqual(step(dir, ["verify", "1"], fakeClaude().env).status, 0);
+  git(dir, "add", "src/label.js");
+  git(dir, "commit", "-qm", "backend checkpoint");
+  write(dir, "src/Page.jsx", "export default () => <p>right</p>;\n");
+  const codex = fakeCodex({ threads: [liveThread(liveId, dir)], audit: { verdict: "PASS", findings: [] } });
+  const result = step(dir, ["audit"], { ...codex.env, CCW_WAIT_POLL_MS: "10" });
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /Code audit running visibly/);
+  assert.match(fs.readFileSync(codex.argsFile, "utf8"), /--resume/);
+  const diff = read(dir, ".codex/verify/fix-label/task.diff");
+  assert.match(diff, /src\/label.js/);
+  assert.match(diff, /src\/Page.jsx/);
+  assert.deepStrictEqual(completion(dir, { hook_event_name: "Stop" }), {});
+  write(dir, "src/label.js", "exports.label = 'wrong again';\n");
+  assert.strictEqual(completion(dir, { hook_event_name: "Stop" }).decision, "block");
+  assert.ok(!completion(dir, { hook_event_name: "Stop", stop_hook_active: true }).decision, "no infinite Stop loop");
+});
+
+test("audit findings cannot pass, remain assigned to their implementer and stop after two reworks", () => {
+  const dir = gateRepo("");
+  assert.strictEqual(step(dir, ["begin"]).status, 0);
+  assert.strictEqual(step(dir, ["phase", "1"]).status, 0);
+  write(dir, "src/label.js", "exports.label = 'wrong';\n");
+  assert.strictEqual(step(dir, ["verify", "1"], fakeClaude().env).status, 0);
+  const codex = fakeCodex({ review: { verdict: "PASS", findings: [{ owner: "Codex", problem: "Wrong label for input X", evidence: "src/label.js:1", proposedFix: "Return right" }] } });
+  for (let n = 0; n < 3; n++) assert.strictEqual(step(dir, ["audit"], codex.env).status, 3);
+  assert.match(read(dir, ".codex/verify/fix-label/code-audit.md"), /Codex: Wrong label/);
+  assert.strictEqual(step(dir, ["audit"], codex.env).status, 4);
+});
+
+test("frontend-only plans need no dummy phase but require Playwright and the Codex audit", () => {
+  const dir = workflowRepo();
+  write(dir, ".codex/plans/add-badge.md", goodPlan.slice(0, goodPlan.indexOf("## Phase 1")).replace("**Covers:** A1", "**Covers:** A1, A2"));
+  const plan = ".codex/plans/add-badge.md";
+  assert.strictEqual(autopilot(dir, ["check", plan]).status, 0);
+  assert.strictEqual(autopilot(dir, ["begin", plan]).status, 0);
+  write(dir, "src/Page.jsx", "export default () => <p>Badge</p>;\n");
+  const codex = fakeCodex();
+  assert.strictEqual(autopilot(dir, ["audit", plan], codex.env).status, 1);
+  write(dir, ".codex/verify/add-badge/final-ui-audit.md", "UI AUDIT: PASS\n");
+  const result = autopilot(dir, ["audit", plan], codex.env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+});
+
+test("session checks exempt read-only and documentation edits, detect unplanned code, and report blockers", () => {
+  const dir = gateRepo("");
+  completion(dir, { hook_event_name: "SessionStart" });
+  write(dir, "settings.json", "{}\n");
+  write(dir, "README.md", "Documentation only\n");
+  assert.deepStrictEqual(completion(dir, { hook_event_name: "Stop" }), {});
+  write(dir, "src/unplanned.js", "throw Error('unplanned');\n");
+  assert.match(completion(dir, { hook_event_name: "Stop" }).reason, /without a recorded task/);
+  assert.strictEqual(step(dir, ["begin"]).status, 0);
+  assert.match(completion(dir, { hook_event_name: "Stop" }).reason, /before begin/);
+  assert.strictEqual(step(dir, ["stop", "--reason", "missing credentials"]).status, 4);
+  assert.match(completion(dir, { hook_event_name: "Stop" }).systemMessage, /blocked, not complete/);
+});
+
+test("session discovery accepts a CLI opened in a repository subfolder, not another worktree", () => {
+  const dir = gitRepo();
+  fs.mkdirSync(path.join(dir, "backend"));
+  const match = lib.pickCodexSession([liveThread(liveId, path.join(dir, "backend"), { source: "cli" })], dir);
+  assert.strictEqual(match.session.id, liveId);
+  const other = gitRepo();
+  assert.strictEqual(lib.pickCodexSession([liveThread(liveId, other)], dir).session, null);
+  assert.strictEqual(lib.pickCodexSession([liveThread(liveId, path.join(process.cwd(), "missing-session-directory"))], process.cwd()).session, null);
+});
+
+test("dispatch locks, invalid audit responses and changed inputs fail closed", () => {
+  const dir = gateRepo("");
+  assert.strictEqual(step(dir, ["begin"]).status, 0);
+  write(dir, ".codex/autopilot/execution.lock", "busy");
+  const codex = fakeCodex();
+  let result = step(dir, ["handoff", "--phase", "1"], codex.env);
+  assert.strictEqual(result.status, 1);
+  assert.match(result.stderr, /already active/);
+  assert.ok(!fs.existsSync(codex.argsFile));
+  fs.unlinkSync(path.join(dir, ".codex/autopilot/execution.lock"));
+  assert.strictEqual(step(dir, ["phase", "1"]).status, 0);
+  write(dir, "src/label.js", "exports.label = 'right';\n");
+  assert.strictEqual(step(dir, ["verify", "1"], fakeClaude().env).status, 0);
+  const broken = fakeCodex({ review: { verdict: "PASS" } });
+  result = step(dir, ["audit"], broken.env);
+  assert.strictEqual(result.status, 1);
+  assert.ok(!fs.existsSync(path.join(dir, ".codex/verify/fix-label/code-audit.json")));
+  write(dir, ".codex/verify.json", '{"checks": [], "baseline": false}');
+  result = step(dir, ["audit"], codex.env);
+  assert.strictEqual(result.status, 1);
+  assert.match(result.stderr, /changed since begin/);
+});
+
+test("completion hooks are installed idempotently and single-agent modes make no Codex call", () => {
+  const dir = gateRepo("");
+  const settings = () => JSON.parse(read(dir, ".claude/settings.local.json"));
+  assert.ok(settings().hooks.SessionStart.some((group) => group.hooks.some((hook) => /completion-gate/.test(hook.command))));
+  assert.ok(settings().hooks.Stop.some((group) => group.hooks.some((hook) => /completion-gate/.test(hook.command))));
+  const before = read(dir, ".claude/settings.local.json");
+  assert.strictEqual(install(dir).status, 0);
+  assert.strictEqual(read(dir, ".claude/settings.local.json"), before);
+  assert.strictEqual(install(dir, ["--claude-only"]).status, 0);
+  assert.ok(!(settings().hooks.Stop || []).some((group) => group.hooks.some((hook) => /completion-gate/.test(hook.command))));
+  assert.deepStrictEqual(completion(dir, { hook_event_name: "Stop" }), {});
+  assert.strictEqual(install(dir, ["--codex-only"]).status, 0);
+  assert.deepStrictEqual(completion(dir, { hook_event_name: "Stop" }), {});
+  assert.strictEqual(install(dir, ["--dual"]).status, 0);
+  assert.strictEqual(JSON.parse(read(dir, ".codex/workflow-manifest.json")).mode, "dual");
+  assert.match(completion(dir, { hook_event_name: "SessionStart" }).hookSpecificOutput.additionalContext, /Automatically route backend/);
+  assert.strictEqual(install(dir, ["--dual", "--claude-only"]).status, 1);
+});
 
 test("begin records a baseline, and a gate failing only with those errors doesn't block", () => {
   const dir = gateRepo(`${oldError}\nFound 1 error.\n`);

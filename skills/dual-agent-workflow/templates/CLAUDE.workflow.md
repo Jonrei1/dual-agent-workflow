@@ -39,19 +39,19 @@ Reply in caveman mode when installed (/caveman); code, commits, plans, reports a
 <!-- only:dual -->
 ### Plan and handoff
 - Route every new plan that changes app code by task type, without asking, and tell the user the route in one line: backend, function or scraping work means **Codex implements (Claude orchestrates)**; UI-only work means **Claude implements**; mixed work means Codex builds the non-UI phases and Claude the frontend after.
-  Ask with AskUserQuestion only when the type is unclear or the user wants **Claude implements** or **Codex, manual phases**; the choice holds for this plan only. Skip read-only questions and doc/config-only edits.
+  Ask with AskUserQuestion only when the task scope is unclear; never ask who implements or ask permission to hand off. Skip read-only questions and doc/config-only edits.
 - For ui: yes, also ask "Watch the browser (headed) or run headless?" and write the answer as
   `- Browser: headed` or `- Browser: headless` in the plan's `## UI audit`. Ask it again before
   any UI check you run outside a plan. List the pages and components you will build under
   `## Frontend (Claude)` with its `**Covers:**` ids; the last Codex phase's Hands off is the API.
-- Claude implements: for each phase, edit, run checks and QA, then request commit approval using the checkpoint rules below.
+- After required plan review and final check, before any app edits, save every approved plan (including UI-only plans) and run `node .codex/autopilot.js begin .codex/plans/<slug>.md`. Keep this original baseline through all rework; UI-only plans have no backend phases.
 - Codex implements: save the approved plan as .codex/plans/<slug>.md using _template.md. Its
   phases are backend only, functions and scraping (`check` rejects frontend files in a phase's Scope); scraping gates use saved fixtures, not live sites, and Steps note robots.txt/terms. Run
   `node .codex/autopilot.js check .codex/plans/<slug>.md` and fix what it lists.
 - For review: codex or risk: high, run `node .codex/autopilot.js review .codex/plans/<slug>.md` with run_in_background: true (it takes minutes; the Bash default of 120000 ms kills it) and read its output when it exits.
   Assess the findings with the user, edit the plan as agreed, and run check again.
 - Run `node .codex/autopilot.js handoff .codex/plans/<slug>.md --phase N` for the first phase (timeout at least 150000 ms).
-  Use one-phase handoffs in both automatic and manual modes. Name the codex queue session used; exit 5: show the paste line in its own code block.
+  Run one-phase handoffs with run_in_background: true; the open Codex CLI is discovered and resumed automatically so the user sees its output; only when none is open does headless Codex start. Read the command outcome and execution log; never request a manual handoff or use --print.
 - Start `node .codex/autopilot.js wait .codex/plans/<slug>.md` with run_in_background: true.
   Tell the user you're watching. If Codex is waiting for approval/input, direct them to its panel.
   Don't write app files while the run is active: they would show up in Codex's phase diffs.
@@ -61,17 +61,18 @@ Reply in caveman mode when installed (/caveman); code, commits, plans, reports a
 ### Review when Codex finishes
 - Done (0): read per-phase alignment/check reports, spot-check git diff and git status. Then
   request approval and commit the last backend phase, build the frontend (ui: yes), then QA and request approval to commit that work separately.
-- Paused (0): review the passing phase, ask approval and commit, then handoff --phase for the next id and wait again. After the approved commit succeeds, continue automatically in the same turn: run the handoff and start wait without asking; manual mode also waits before handoff.
+- Paused (0): review the passing phase, ask approval and commit, then handoff --phase for the next id and wait again. After the approved commit succeeds, continue automatically in the same turn: run the handoff and start wait without asking.
 - Stuck (4) or failed (1): explain the reason and Codex's last message. Resolve environment
-  or plan problems; ask before handoff --phase N --continue for the stopped phase. For NOT STARTED, use --phase N without --continue.
+  or plan problems; automatically retry handoff --phase N --continue for in-scope fixes, respecting retry limits. For NOT STARTED, use --phase N without --continue.
 - Timed out (6): report whether Codex never started or is still running; offer to wait again.
 - QA pass: review the current phase before its commit; final QA reviews the entire diff from recorded task-base HEAD
   through the working tree (including committed phases), using /ponytail-review when installed. Fix mechanical Must findings; behavior problems
-  become a rework plan, and ask before handing it to Codex. Report Should and Nice findings
+  go automatically to Codex as in-scope rework with --phase N --continue; keep the original plan and task baseline. Report Should and Nice findings
   without acting on them.
+- After frontend/Playwright and QA fixes, run `node .codex/autopilot.js audit .codex/plans/<slug>.md` with run_in_background: true. Read code-audit.md; send backend findings to Codex automatically, fix frontend findings yourself, rerun checks and audit until PASS (two reworks maximum). This is required even for UI-only tasks.
 - Write .codex/tasks/<YYYY-MM-DD>-<slug>.md from the template below (25 lines max), using the actual diff for deviations; report shipped work, verdicts, baseline failures and follow-ups.
   Record paused or unfinished work as such instead of claiming the task passed.
-- During Codex execution, new check failures and alignment findings go back to Codex within scope; after completion, propose a rework plan for backend problems and ask before handoff. The helper updates the graph at close; after direct code edits run graphify update . once.
+- During Codex execution, new check failures and alignment findings go back to Codex within scope; after completion, send in-scope backend problems to Codex automatically with --phase N --continue. The helper updates the graph at close; after direct code edits run graphify update . once.
 
 ### Phase checkpoints (Claude only)
 <!-- /only -->
@@ -96,7 +97,7 @@ Reply in caveman mode when installed (/caveman); code, commits, plans, reports a
 <!-- /only -->
 - Before every git commit (phase, frontend, QA fix or retry), show the files, diff summary and proposed message; ask with AskUserQuestion and wait for explicit approval. Prior approval never covers another commit.
 <!-- only:dual -->
-- Approving a commit also approves the next phase: once the commit succeeds, start the next phase in the same turn (Claude implements: edit it; Codex implements: run handoff --phase <next id>, then start wait). Don't end the turn, summarize or ask to continue in between; stop only for the next commit approval, a failure or the end of the plan. Only manual mode asks before each handoff.
+- Approving a commit also approves the next phase: once the commit succeeds, start the next phase in the same turn (Claude implements: edit it; Codex implements: run handoff --phase <next id>, then start wait). Don't end the turn, summarize or ask to continue in between; stop only for the next commit approval, a failure or the end of the plan. Never ask permission for the next handoff.
 <!-- /only -->
 <!-- only:claude -->
 - Approving a commit also approves the next phase: once the commit succeeds, start the next phase in the same turn. Don't end the turn, summarize or ask to continue in between; stop only for the next commit approval, a failure or the end of the plan.

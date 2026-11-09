@@ -30,8 +30,8 @@ if (!approved) {
 }
 
 const context = `Plan approved. Follow CLAUDE.local.md, section Workflow.
-Route THIS plan by task type without asking: backend, functions and scraping go to Codex; Claude builds all frontend itself after Codex finishes. Ask only if the type is unclear. For ui: yes also ask headed or headless, record it as - Browser: in the UI audit, and list the frontend under ## Frontend (Claude). For Codex, save and check the plan, run review when required, handoff (manual: --phase N), then wait in the background.
-When wait returns, review the reports and diff, build the frontend and audit it, run the QA pass, write the task summary and report to the user.`;
+Route THIS plan by task type without asking: backend, functions and scraping go to Codex; Claude builds all frontend itself after Codex finishes. Ask only if the type is unclear. For ui: yes also ask headed or headless, record it as - Browser: in the UI audit, and list the frontend under ## Frontend (Claude). For Codex, save and check the plan, run review when required, run begin before any edits (also for UI-only plans), then handoff --phase N with run_in_background: true. Use the open Codex terminal automatically so the user sees it work; fall back to headless only when no session is open. No user handoff is needed. Never use --print automatically.
+When wait returns, review the reports and diff, build the frontend and audit it, run the QA pass and autopilot.js audit PLAN in the background. Automatically route backend findings to Codex and frontend fixes to yourself, re-audit after fixes, then write the task summary. Never claim completion without a current PASS code audit.`;
 
 // A --claude-only project has no Codex: Claude builds the whole plan itself.
 const claudeOnly = `Plan approved. Follow CLAUDE.local.md, section Workflow. This project has no Codex: implement THIS plan yourself, phase by phase.
