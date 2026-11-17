@@ -99,7 +99,7 @@ Setup inspects your project (Node, Python, Go, Rust) and detects build/lint/test
 | `--tools-only` | Install global tools, Chromium, and user plugins only; leave project files untouched. |
 | `--dry-run` | Output planned actions without writing any files or installing packages. |
 | `--skip-playwright` | Omit Playwright MCP package, Chromium download, and browser registrations. |
-| `--skip-skills` | Omit ponytail, taste-skill, and caveman helper plugins. |
+| `--skip-skills` | Omit ponytail, taste-skill, caveman, superpowers, and ui-ux-pro-max helper plugins. |
 | `--skip-graphify` | Omit graphify CLI, skills, and Claude guard hooks. |
 | `--graphify-scope=user\|global` | Specify graphify installation scope non-interactively (default: `user`). |
 | `--root <dir>` | Specify target repository directory if running from outside project root. |

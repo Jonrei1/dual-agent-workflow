@@ -27,7 +27,8 @@ Roles: Codex builds the backend, standalone functions and web scraping (a plan's
 every frontend itself from the start, after Codex finishes, and audits it with Playwright
 against the plan's `## UI audit`, so there is no Codex-builds-then-Claude-fixes rework.
 ponytail keeps changes small (Codex builds in its mode; Claude runs /ponytail-review as the QA
-pass and the alignment review applies the same lens). taste-skill guides the frontend Claude builds.
+pass and the alignment review applies the same lens). taste-skill and ui-ux-pro-max guide the frontend Claude builds through /execute-ui-plan, and
+`.claude/rules/frontend-ai-slop.md` bans generic AI-design patterns over both.
 Every UI plan records `- Browser: headless | headed`, which Claude asks the user.
 Plan review uses Codex usage through autopilot.js review before handoff.
 caveman keeps chat replies terse (code, commits, plans and reports stay normal prose); graphify's
@@ -68,7 +69,7 @@ node <skill folder>/scripts/install.js
 
 Requires Node 18+ and Git; use a supported Node LTS and OS for browser tooling.
 The installer checks/installs Claude Code and/or Codex CLI, Playwright MCP and matching
-Chromium, graphify and its skill per agent, and the ponytail, taste-skill and caveman plugins.
+Chromium, graphify and its skill per agent, and the ponytail, taste-skill and caveman plugins, plus superpowers and ui-ux-pro-max for Claude.
 Sign in to the CLIs separately. Playwright is registered for the agent that builds the frontend
 (Claude, or Codex in --codex-only), with absolute executable paths and --isolated, as
 `playwright` (--headless) and `playwright-headed` (a visible window). The plugins are installed
@@ -87,7 +88,7 @@ for user scope; global scope uses system pip. See README for machine prerequisit
 | --graphify-scope=user|global | Choose graphify installation scope |
 | --skip-graphify | Skip graphify skills and Claude's guard hooks; tools stage still checks it |
 | --skip-playwright | Skip browser package, download and registrations |
-| --skip-skills | Skip the ponytail, taste-skill and caveman plugins |
+| --skip-skills | Skip the ponytail, taste-skill, caveman, superpowers and ui-ux-pro-max plugins |
 | --root <dir> | Configure the Git repo containing that directory |
 | --sync | Quiet, files-only upgrade of a set-up project; run by the plugin's SessionStart hook |
 

@@ -113,16 +113,21 @@ Reply in caveman mode when installed (/caveman); code, commits, plans, reports a
 - Rejected or pending approval, or a failed commit, blocks the next phase; never bypass hooks or treat silence as approval. Final summaries list the base HEAD and all checkpoint SHAs for backtracking.
 <!-- /only -->
 
+superpowers, when installed: brainstorming for unclear scope, systematic-debugging for failures and bugs, test-driven-development for your logic, verification-before-completion before any PASS.
+Never its writing-plans, executing-plans, subagent-driven-development, using-git-worktrees or finishing-a-development-branch: the plan, autopilot and commit checkpoints own those.
+
 ### Frontend (ui: yes, and any UI task you implement)
 Build it yourself, once, as the finished design: components, styles, states, copy and
 <!-- only:dual -->
 accessibility, wired to the API from the last Hands off. Use taste-skill when installed:
 redesign-existing-projects for app screens, design-taste-frontend for new public pages.
+Run /execute-ui-plan <plan>; ui-ux-pro-max for palette/type/UX lookups; .claude/rules/frontend-ai-slop.md overrides both skills.
 Bounds: only what `## Frontend (Claude)` lists; no new dependency, design system or image
 <!-- /only -->
 <!-- only:claude -->
 accessibility, wired to the API the earlier phases built. Use taste-skill when installed:
 redesign-existing-projects for app screens, design-taste-frontend for new public pages.
+Run /execute-ui-plan <plan>; ui-ux-pro-max for palette/type/UX lookups; .claude/rules/frontend-ai-slop.md overrides both skills.
 Bounds: only what the plan lists; no new dependency, design system or image
 <!-- /only -->
 sourcing unless the plan asks. Then audit your own work once with Playwright against `## UI

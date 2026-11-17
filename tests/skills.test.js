@@ -40,8 +40,9 @@ function fixture(options = {}) {
 
 const writes = (f) => f.calls.filter((call) => !["list"].includes(call.args[1]));
 
-test("the plugins are ponytail, taste-skill and caveman; Codex gets caveman from its curated marketplace", () => {
-  assert.deepEqual(SKILLS.map((skill) => [skill.id, skill.repo]), [["ponytail@ponytail", "DietrichGebert/ponytail"], ["taste-skill@taste-skill", "Leonxlnx/taste-skill"], ["caveman@caveman", "JuliusBrussee/caveman"]]);
+test("the plugins are ponytail, taste-skill, caveman and Claude-only superpowers and ui-ux-pro-max; Codex gets caveman from its curated marketplace", () => {
+  assert.deepEqual(SKILLS.map((skill) => [skill.id, skill.repo]), [["ponytail@ponytail", "DietrichGebert/ponytail"], ["taste-skill@taste-skill", "Leonxlnx/taste-skill"], ["caveman@caveman", "JuliusBrussee/caveman"], ["superpowers@claude-plugins-official", "anthropics/claude-plugins-official"], ["ui-ux-pro-max@ui-ux-pro-max-skill", "nextlevelbuilder/ui-ux-pro-max-skill"]]);
+  assert.deepEqual(SKILLS.slice(3).map((skill) => skill.clients), [["claude"], ["claude"]]);
   assert.deepEqual(SKILLS[2].codex, { repo: "", id: "caveman@openai-curated-remote" });
 });
 
@@ -56,6 +57,10 @@ test("a first run adds the marketplaces and installs every plugin for Claude and
     "claude plugin install taste-skill@taste-skill --scope user",
     "claude plugin marketplace add JuliusBrussee/caveman",
     "claude plugin install caveman@caveman --scope user",
+    "claude plugin marketplace add anthropics/claude-plugins-official",
+    "claude plugin install superpowers@claude-plugins-official --scope user",
+    "claude plugin marketplace add nextlevelbuilder/ui-ux-pro-max-skill",
+    "claude plugin install ui-ux-pro-max@ui-ux-pro-max-skill --scope user",
     "codex plugin marketplace add DietrichGebert/ponytail",
     "codex plugin add ponytail@ponytail",
     "codex plugin marketplace add Leonxlnx/taste-skill",
@@ -76,11 +81,11 @@ test("existing plugins are kept: nothing is asked or installed on a repeat run",
   await setupSkills(f.env);
   assert.equal(writes(f).length, 0);
   assert.equal(f.prompts.length, 0);
-  assert.equal(f.records.filter((record) => record.note === "already installed").length, 6);
+  assert.equal(f.records.filter((record) => record.note === "already installed").length, 8);
 });
 
 test("only the missing plugin of a client is installed", async () => {
-  const f = fixture({ installed: ["claude:ponytail@ponytail", "claude:taste-skill@taste-skill", "claude:caveman@caveman", "codex:ponytail@ponytail", "codex:caveman@openai-curated-remote"] });
+  const f = fixture({ installed: ["claude:ponytail@ponytail", "claude:taste-skill@taste-skill", "claude:caveman@caveman", "claude:superpowers@claude-plugins-official", "claude:ui-ux-pro-max@ui-ux-pro-max-skill", "codex:ponytail@ponytail", "codex:caveman@openai-curated-remote"] });
   await setupSkills(f.env);
   const lines = writes(f).map((call) => `${call.command} ${call.args.join(" ")}`);
   assert.deepEqual(lines, ["codex plugin marketplace add Leonxlnx/taste-skill", "codex plugin add taste-skill@taste-skill"]);
@@ -92,7 +97,7 @@ test("dry run performs no installs and no prompts", async () => {
   assert.equal(writes(f).length, 0);
   assert.equal(f.prompts.length, 0);
   assert.equal(f.records.at(-1).ok, null);
-  assert.match(f.records.at(-1).note, /ponytail, taste-skill, caveman as user plugins for claude and codex/);
+  assert.match(f.records.at(-1).note, /ponytail, taste-skill, caveman, superpowers, ui-ux-pro-max as user plugins for claude and codex/);
 });
 
 test("a single-agent project installs the plugins for that agent only", async () => {

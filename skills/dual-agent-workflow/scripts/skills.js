@@ -10,12 +10,18 @@
 //   taste-skill UI/UX art direction for whichever agent builds the frontend.
 //   caveman     terse replies with full technical substance: fewer output tokens per turn,
 //               which matters most when one agent carries the whole task.
+//   superpowers Claude's debugging, TDD and verify-before-done skills (the workflow rules say
+//               which ones; autopilot keeps plans, handoffs and commits).
+//   ui-ux-pro-max palette, type and UX guideline lookups for the frontend Claude builds.
+// `clients` limits a plugin to some agents (both when missing).
 // `codex` overrides the marketplace repo and plugin id for Codex; a missing repo means the
 // plugin comes from a marketplace Codex already has.
 const SKILLS = [
   { name: "ponytail", repo: "DietrichGebert/ponytail", id: "ponytail@ponytail" },
   { name: "taste-skill", repo: "Leonxlnx/taste-skill", id: "taste-skill@taste-skill" },
   { name: "caveman", repo: "JuliusBrussee/caveman", id: "caveman@caveman", codex: { repo: "", id: "caveman@openai-curated-remote" } },
+  { name: "superpowers", repo: "anthropics/claude-plugins-official", id: "superpowers@claude-plugins-official", clients: ["claude"] },
+  { name: "ui-ux-pro-max", repo: "nextlevelbuilder/ui-ux-pro-max-skill", id: "ui-ux-pro-max@ui-ux-pro-max-skill", clients: ["claude"] },
 ];
 
 const forClient = (skill, client) => ({ ...skill, ...(skill[client] || {}) });
@@ -66,7 +72,7 @@ async function setupSkills({ run, has, confirm, record, dryRun, clients: wanted 
   }
   const missing = [];
   for (const client of clients) {
-    for (const skill of SKILLS.map((entry) => forClient(entry, client))) {
+    for (const skill of SKILLS.filter((entry) => !entry.clients || entry.clients.includes(client)).map((entry) => forClient(entry, client))) {
       const present = client === "claude" ? claudeHas(run, skill.id) : codexHas(run, skill.id);
       if (present) record(`${skill.name} (${client})`, true, "already installed");
       else missing.push({ client, skill });

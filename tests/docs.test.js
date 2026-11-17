@@ -45,7 +45,7 @@ test("the rules wire in ponytail, taste-skill, the headed or headless question a
   assert.ok(claude.trimEnd().split("\n").length <= 105);
   assert.ok(/```md\n([\s\S]*?)```/.exec(claude)[1].trimEnd().split("\n").length <= 25);
   for (const term of ["AskUserQuestion", "review", "handoff", "wait", "final-ui-audit.md", ".codex/tasks/", "git commit"]) assert.ok(claude.includes(term), term);
-  for (const term of ['model: "haiku"', "### Frontend", "Claude builds every frontend, from the start", "## Frontend (Claude)", "backend only", "Don't write app files while the run is active", "/ponytail-review", "redesign-existing-projects", "design-taste-frontend", "headed", "headless", "mcp__playwright-headed__*", "- Browser:", "worktree"]) assert.ok(claude.includes(term), term);
+  for (const term of ['model: "haiku"', "### Frontend", "Claude builds every frontend, from the start", "## Frontend (Claude)", "backend only", "Don't write app files while the run is active", "/ponytail-review", "redesign-existing-projects", "design-taste-frontend", "headed", "headless", "mcp__playwright-headed__*", "- Browser:", "worktree", "/execute-ui-plan", "frontend-ai-slop.md", "ui-ux-pro-max", "systematic-debugging"]) assert.ok(claude.includes(term), term);
   assert.match(claude, /^<!-- dual-agent-workflow:end -->\n?$/m);
   const codex = forMode(read(path.join(templates, "AGENTS.codex.md")), "dual");
   assert.match(claude, /backend and API, standalone functions and logic, and web scraping/);

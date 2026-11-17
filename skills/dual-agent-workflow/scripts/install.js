@@ -76,6 +76,8 @@ const MANIFEST = ".codex/workflow-manifest.json";
 // Scripts the workflow owns: always the plugin's version, and removed once a later version drops them.
 const OWNED = ["codex/hooks/claude-verify.js", "codex/hooks/workflow-lib.js", "codex/hooks/claude-plan-gate.js", "codex/hooks/claude-completion-gate.js", "codex/autopilot.js"];
 const CODEX_RULES = ".codex/workflow/CODEX.md";
+// Claude's UI build command and anti-slop rule, owned like the scripts; not in a Codex-only project.
+const CLAUDE_OWNED = ["claude/commands/execute-ui-plan.md", "claude/rules/frontend-ai-slop.md"];
 // Files the user may customize: created when missing, refreshed only while still unmodified.
 const MANAGED = [["plans/_template.md", ".codex/plans/_template.md"]];
 // Files an earlier version installed and this one dropped. An unedited copy (its hash matches
@@ -590,6 +592,7 @@ function localPaths(root) {
     ...(isTracked(root, ".codex/hooks.json") ? [] : [".codex/hooks.json"]),
     "CLAUDE.local.md",
     ".claude/settings.local.json",
+    ...CLAUDE_OWNED.map((file) => `.${file}`),
     "graphify-out/",
   ];
 }
@@ -679,8 +682,9 @@ function setupProject(root, graphify, mode) {
   }
   const render = (from) => lib.forMode(fs.readFileSync(path.join(templates, from), "utf8"), mode);
   // A Claude-only project has no Codex rules; an earlier copy is removed as a stale file.
-  const ownedPaths = [...OWNED.map((file) => `.${file}`), ...(mode === "claude" ? [] : [CODEX_RULES])];
-  for (const file of OWNED) copyOwned(root, file, `.${file}`);
+  const claudeOwned = mode === "codex" ? [] : CLAUDE_OWNED;
+  const ownedPaths = [...[...OWNED, ...claudeOwned].map((file) => `.${file}`), ...(mode === "claude" ? [] : [CODEX_RULES])];
+  for (const file of [...OWNED, ...claudeOwned]) copyOwned(root, file, `.${file}`);
   if (mode !== "claude") {
     const title = mode === "codex" ? "Codex rules for the Codex-only workflow" : "Codex rules for the Claude + Codex workflow";
     writeOwned(root, `# ${title}\n\n${render("AGENTS.codex.md")}`, CODEX_RULES);

@@ -53,7 +53,9 @@ Set up the Claude + Codex workflow in the current project.
      builds every frontend itself and audits it with one of them; it asks which for every UI plan. Backend, function and scraping work is routed to Codex automatically. Existing registrations are kept. Restart Claude
      and check `/mcp`.
    - ponytail (senior dev and QA), taste-skill (UI/UX) and caveman (terse replies) are
-     installed as user-scope plugins for each agent in use, and graphify's skill per agent.
+     installed as user-scope plugins for each agent in use, plus superpowers and ui-ux-pro-max
+     for Claude, and graphify's skill per agent. Claude also gets /execute-ui-plan and the
+     `.claude/rules/frontend-ai-slop.md` rule (local only).
      `--skip-skills` and `--skip-graphify` opt out.
    - In `--codex-only`, Playwright is registered for Codex instead, and Codex must trust the
      SessionStart hook that loads its rules (`/hooks`).
