@@ -134,3 +134,10 @@ test("versions and manifests agree on v4.3", () => {
   assert.match(JSON.parse(read(path.join(repo, "package.json"))).repository, /dual-agent-workflow/);
   assert.ok(JSON.parse(read(path.join(repo, "package.json"))).files.includes("skills"));
 });
+
+test("the UI command follows the project's mode: Codex rework and autopilot audit only with Codex and a begun plan", () => {
+  const command = fs.readFileSync(path.join(templates, "claude", "commands", "execute-ui-plan.md"), "utf8");
+  assert.match(command, /in a Claude-only project fix it yourself/);
+  assert.match(command, /in a Claude \+ Codex project with a plan that ran\s+`begin`/);
+  assert.match(command, /otherwise QA \(\/ponytail-review/);
+});

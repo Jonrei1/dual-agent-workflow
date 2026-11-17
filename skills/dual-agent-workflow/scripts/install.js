@@ -26,8 +26,8 @@
 // and can't cause merge conflicts for teammates: every developer sets up their own clone. The
 // scripts under .codex/ belong to the workflow and are updated on every run, so re-running the
 // installer upgrades a project. Scripts an earlier version installed and this one no longer
-// ships are removed (listed in the untracked .codex/workflow-manifest.json; only .codex/ script
-// paths are ever removed). It never commits.
+// ships are removed (listed in the untracked .codex/workflow-manifest.json; only workflow
+// scripts and the two Claude-owned UI files are eligible). It never commits.
 //
 // The plugin also runs `install.js --sync` from a SessionStart hook, so a plugin update reaches
 // every project that already uses the workflow (and its git worktrees) without re-running setup.
@@ -377,14 +377,15 @@ function copyManaged(root, source, to, previous) {
 }
 
 // Only paths shaped like a script the plugin ships can be removed: a top-level .codex/*.js,
-// .codex/hooks/*.js or .codex/workflow/*.md. A manifest naming anything else (.env, .git/config,
+// .codex/hooks/*.js or .codex/workflow/*.md, plus the two exact Claude-owned UI paths.
+// A manifest naming anything else (.env, .git/config,
 // a plan, a drive-relative or ".." path) is ignored, so a planted manifest can't delete files.
 const STALE_PATH = /^\.codex\/(?:hooks\/[\w-]+(?:\.[\w-]+)*\.js|workflow\/[\w-]+(?:\.[\w-]+)*\.md|[\w-]+(?:\.[\w-]+)*\.js)$/;
 
 // Deletes files an earlier version installed that this one no longer ships.
 function removeStale(root, previous, current) {
   for (const file of Array.isArray(previous.files) ? previous.files : []) {
-    if (typeof file !== "string" || current.includes(file) || !STALE_PATH.test(file)) continue;
+    if (typeof file !== "string" || current.includes(file) || !(STALE_PATH.test(file) || CLAUDE_OWNED.some((owned) => file === `.${owned}`))) continue;
     if (readText(path.join(root, file)) !== null) remove(root, file);
   }
 }
@@ -682,7 +683,12 @@ function setupProject(root, graphify, mode) {
   }
   const render = (from) => lib.forMode(fs.readFileSync(path.join(templates, from), "utf8"), mode);
   // A Claude-only project has no Codex rules; an earlier copy is removed as a stale file.
-  const claudeOwned = mode === "codex" ? [] : CLAUDE_OWNED;
+  const claudeOwned = mode === "codex" ? [] : CLAUDE_OWNED.filter((file) => {
+    const rel = `.${file}`;
+    if (!fs.existsSync(path.join(root, rel)) || (Array.isArray(previous.files) && previous.files.includes(rel))) return true;
+    record(rel, null, "existing local file, not owned by the workflow; left unchanged");
+    return false;
+  });
   const ownedPaths = [...[...OWNED, ...claudeOwned].map((file) => `.${file}`), ...(mode === "claude" ? [] : [CODEX_RULES])];
   for (const file of [...OWNED, ...claudeOwned]) copyOwned(root, file, `.${file}`);
   if (mode !== "claude") {

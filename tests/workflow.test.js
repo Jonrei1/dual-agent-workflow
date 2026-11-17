@@ -102,6 +102,73 @@ test("setup in a fresh repo writes no Codex hooks file unless Codex works alone"
 
 const manifestMode = (dir) => JSON.parse(read(dir, ".codex/workflow-manifest.json")).mode;
 
+test.each(["--dual", "--claude-only"])("%s installs and excludes the Claude UI files; switching to Codex removes them", (mode) => {
+  const dir = gitRepo();
+  const files = [".claude/commands/execute-ui-plan.md", ".claude/rules/frontend-ai-slop.md"];
+  const setup = (flag) => {
+    const result = install(dir, [flag]);
+    assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  };
+  setup("--codex-only");
+  for (const file of files) assert.ok(!fs.existsSync(path.join(dir, file)), file);
+  setup(mode);
+  const manifest = JSON.parse(read(dir, ".codex/workflow-manifest.json"));
+  const excluded = read(dir, ".git/info/exclude").split(/\r?\n/);
+  for (const file of files) {
+    assert.strictEqual(read(dir, file), fs.readFileSync(path.join(skill, "templates", file.slice(1)), "utf8"));
+    assert.ok(manifest.files.includes(file), file);
+    assert.ok(excluded.includes(file), file);
+    assert.strictEqual(git(dir, "check-ignore", "--", file), file);
+  }
+  setup("--codex-only");
+  const current = JSON.parse(read(dir, ".codex/workflow-manifest.json"));
+  for (const file of files) {
+    assert.ok(!fs.existsSync(path.join(dir, file)), file);
+    assert.ok(!current.files.includes(file), file);
+  }
+});
+
+test.each([
+  ["--dual", false], ["--claude-only", false],
+  ["--dual", true], ["--claude-only", true],
+])("%s preserves unowned Claude UI files on setup and sync (sync: %s)", (mode, sync) => {
+  const dir = gitRepo();
+  const files = [".claude/commands/execute-ui-plan.md", ".claude/rules/frontend-ai-slop.md"];
+  if (sync) write(dir, ".codex/workflow-manifest.json", JSON.stringify({ mode: mode === "--dual" ? "dual" : "claude", guards: false, files: [] }));
+  for (const file of files) write(dir, file, `my local ${file}\n`);
+  for (let run = 0; run < 2; run++) {
+    const result = install(dir, sync ? ["--sync"] : [mode]);
+    assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+    const manifest = JSON.parse(read(dir, ".codex/workflow-manifest.json"));
+    for (const file of files) {
+      assert.strictEqual(read(dir, file), `my local ${file}\n`);
+      assert.ok(!manifest.files.includes(file), "preserved files must not be adopted on the next run");
+    }
+  }
+  const switched = install(dir, ["--codex-only"]);
+  assert.strictEqual(switched.status, 0, switched.stdout + switched.stderr);
+  for (const file of files) assert.strictEqual(read(dir, file), `my local ${file}\n`);
+});
+
+test("Claude UI cleanup ignores other manifest paths and preserves files through a directory link", () => {
+  const dir = gitRepo();
+  const outside = tempDir("ccw-ui-link-");
+  write(outside, "execute-ui-plan.md", "external command\n");
+  fs.mkdirSync(path.join(dir, ".claude"));
+  fs.symlinkSync(outside, path.join(dir, ".claude/commands"), isWindows ? "junction" : "dir");
+  const unrelated = [".claude/rules/custom.md", ".claude/commands/other.md", ".claude/rules/../custom.md"];
+  for (const file of unrelated) write(dir, file, "user file\n");
+  write(dir, ".codex/workflow-manifest.json", JSON.stringify({ files: [
+    ".claude/commands/execute-ui-plan.md", ...unrelated,
+  ] }));
+  const result = install(dir, ["--codex-only"]);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /stale, but reached through a symlink; left in place/);
+  assert.strictEqual(read(outside, "execute-ui-plan.md"), "external command\n");
+  assert.ok(fs.lstatSync(path.join(dir, ".claude/commands")).isSymbolicLink());
+  for (const file of unrelated) assert.strictEqual(read(dir, file), "user file\n");
+});
+
 test("--claude-only sets up Claude alone: no Codex rules or hooks, and Claude builds everything", () => {
   const dir = gitRepo();
   const result = install(dir, ["--claude-only"]);

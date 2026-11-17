@@ -21,7 +21,8 @@ verified results. A proposal, mockup or audit alone is not done.
 ## Rules
 - Work locally; never deploy or push. Never fabricate paths, scripts, data, screenshots or results.
 - Reuse what exists; no new library, palette or component kit unless the plan asks.
-- Build only what the plan lists. A backend defect goes to Codex as rework, not into your diff.
+- Build only what the plan lists. A backend defect: in a Claude + Codex project it goes to Codex
+  as rework, not into your diff; in a Claude-only project fix it yourself within the plan.
 - Any edit after a visual check invalidates it: re-screenshot and re-check.
 - Skills: ui-ux-pro-max for palette, type and UX guideline lookups; taste-skill
   (redesign-existing-projects for app screens, design-taste-frontend for public pages) for
@@ -47,7 +48,9 @@ verified results. A proposal, mockup or audit alone is not done.
    and write `final-ui-audit.md` there: PASS/FAIL per `## UI audit` item and per slop item,
    exceptions, URLs, commands run, then `UI AUDIT: PASS | NEEDS REWORK | BLOCKED`.
 6. **Reconcile.** Check each plan item: implemented, rendered, slop-checked, verified. Then follow
-   the workflow: QA, `node .codex/autopilot.js audit <plan>`, commit approval.
+   the project's workflow rules (CLAUDE.local.md): in a Claude + Codex project with a plan that ran
+   `begin`, QA then `node .codex/autopilot.js audit <plan>`; otherwise QA (/ponytail-review when
+   installed). Commit only with approval.
 
 ## Report
 ```text
