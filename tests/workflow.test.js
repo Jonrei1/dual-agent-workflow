@@ -717,6 +717,25 @@ test("begin records a baseline, and a gate failing only with those errors doesn'
   assert.deepStrictEqual(status.phases["1"].preexisting, ["node gate.js"]);
 });
 
+test.each(["npm run test", "npm run-script test"])("baseline normalizes a failing %s check so verify reports it as preexisting", (cmd) => {
+  const dir = gateRepo("");
+  write(dir, "package.json", JSON.stringify({ name: "baseline-test", version: "1.0.0", scripts: { test: "node check.js" } }));
+  write(dir, "check.js", `process.stdout.write(${JSON.stringify(oldError)}); process.exit(1);\n`);
+  write(dir, ".codex/verify.json", JSON.stringify({ checks: [cmd] }));
+  const begun = step(dir, ["begin"]);
+  assert.strictEqual(begun.status, 0, begun.stdout + begun.stderr);
+  const baseline = lib.readBaseline(dir, "fix-label");
+  assert.strictEqual(baseline.commands["npm test"].ok, false);
+  assert.ok(!Object.hasOwn(baseline.commands, cmd));
+  assert.strictEqual(step(dir, ["phase", "1"]).status, 0);
+  write(dir, "src/label.js", "module.exports = 'right';\n");
+  const result = step(dir, ["verify", "1"], fakeClaude().env);
+  assert.strictEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /npm test fails only with errors that were there before the task started; not blocking/);
+  assert.match(result.stdout, /VERDICT: PASS/);
+  assert.deepStrictEqual(JSON.parse(read(dir, ".codex/autopilot/status.json")).phases["1"].preexisting, ["npm test"]);
+});
+
 test("a gate with a new failure exits 2 and lists what's new; the 3rd failure stops the run", () => {
   const dir = gateRepo(`${oldError}\n`);
   assert.strictEqual(step(dir, ["begin"]).status, 0);

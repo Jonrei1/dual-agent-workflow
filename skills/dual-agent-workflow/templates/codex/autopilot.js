@@ -171,13 +171,17 @@ function assertPlanValid(plan) {
   if (problems.length) throw new Stop("failed", `${planRel} isn't runnable:\n  - ${problems.join("\n  - ")}`);
 }
 
+function normalizeCommand(cmd) {
+  return cmd.trim().replace(/^npm (?:run|run-script) test$/, "npm test");
+}
+
 // A gate passes when it exits 0, or when it fails only with errors that were already there
 // before the task started (the baseline `begin` recorded). Result: { ok, preexisting } or
 // { ok: false, gate, output, newLines, summary }.
 async function runGates(phase) {
   const baseline = lib.readBaseline(repoRoot, slug);
   const preexisting = [];
-  const commands = [...new Set([...phase.gates, ...lib.detectChecks(repoRoot)].map((cmd) => cmd.trim().replace(/^npm (?:run|run-script) test$/, "npm test")))];
+  const commands = [...new Set([...phase.gates, ...lib.detectChecks(repoRoot)].map(normalizeCommand))];
   for (const cmd of commands) log(`gate/check: ${cmd}`);
   const results = await lib.runCommandsAsync(repoRoot, commands, { timeout: callTimeoutMs, env: childEnv });
   const reportDir = lib.taskVerifyDir(repoRoot, slug);
@@ -658,7 +662,7 @@ async function recordBaseline(plan, tree) {
     log("baseline: off (verify.json)");
     return;
   }
-  const commands = [...new Set([...plan.phases.flatMap((phase) => phase.gates), ...lib.detectChecks(repoRoot)])];
+  const commands = [...new Set([...plan.phases.flatMap((phase) => phase.gates), ...lib.detectChecks(repoRoot)].map(normalizeCommand))];
   if (!commands.length) return;
   log(`baseline: running ${commands.length} gate/check command(s) on the starting tree`);
   const baseline = await lib.recordBaseline(repoRoot, slug, commands, { tree, timeout: callTimeoutMs, env: childEnv });
