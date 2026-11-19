@@ -128,6 +128,36 @@ test.each(["--dual", "--claude-only"])("%s installs and excludes the Claude UI f
   }
 });
 
+test.each(["--dual", "--claude-only"])("%s keeps Claude UI ownership after a failed setup, retry, update and mode switch", (mode) => {
+  const dir = gitRepo();
+  const files = [".claude/commands/execute-ui-plan.md", ".claude/rules/frontend-ai-slop.md"];
+  write(dir, ".claude/settings.local.json", "invalid json");
+  const failed = install(dir, [mode]);
+  assert.strictEqual(failed.status, 1, failed.stdout + failed.stderr);
+  const partial = JSON.parse(read(dir, ".codex/workflow-manifest.json"));
+  assert.ok(!partial.version, "a failed setup must not mark the upgrade complete");
+  for (const file of files) {
+    assert.ok(fs.existsSync(path.join(dir, file)), file);
+    assert.ok(partial.files.includes(file), file);
+  }
+
+  write(dir, ".claude/settings.local.json", "{}");
+  const retry = install(dir, [mode]);
+  assert.strictEqual(retry.status, 0, retry.stdout + retry.stderr);
+  const manifest = JSON.parse(read(dir, ".codex/workflow-manifest.json"));
+  for (const file of files) {
+    assert.ok(manifest.files.includes(file), file);
+    write(dir, file, "old plugin version\n");
+  }
+  const updated = install(dir, ["--sync"]);
+  assert.strictEqual(updated.status, 0, updated.stdout + updated.stderr);
+  for (const file of files) assert.strictEqual(read(dir, file), fs.readFileSync(path.join(skill, "templates", file.slice(1)), "utf8"));
+
+  const switched = install(dir, ["--codex-only"]);
+  assert.strictEqual(switched.status, 0, switched.stdout + switched.stderr);
+  for (const file of files) assert.ok(!fs.existsSync(path.join(dir, file)), file);
+});
+
 test.each([
   ["--dual", false], ["--claude-only", false],
   ["--dual", true], ["--claude-only", true],

@@ -719,10 +719,15 @@ function setupProject(root, graphify, mode) {
   // Sync is files only: graphify is left as it is.
   if (!sync) setupIntegrations(graphify);
 
-  if (!dryRun && results.every((r) => r.ok !== false)) {
-    const manifest = { version: pluginVersion, mode, ...(guards ? {} : { guards: false }), files: ownedPaths, managed };
+  if (!dryRun) {
+    const complete = results.every((r) => r.ok !== false);
+    const installedClaude = claudeOwned.map((file) => `.${file}`).filter((file) => results.some((r) => r.step === file && r.ok === true));
+    // Keep ownership after a partial setup without marking the upgrade complete.
+    const manifest = complete
+      ? { version: pluginVersion, mode, ...(guards ? {} : { guards: false }), files: ownedPaths, managed }
+      : { ...previous, mode, ...(guards ? {} : { guards: false }), files: [...new Set([...(Array.isArray(previous.files) ? previous.files : []), ...installedClaude])] };
     const text = JSON.stringify(manifest, null, 2) + "\n";
-    if (readText(path.join(root, MANIFEST)) !== text) write(path.join(root, MANIFEST), text, MANIFEST, `workflow v${pluginVersion}`);
+    if ((complete || installedClaude.length) && readText(path.join(root, MANIFEST)) !== text) write(path.join(root, MANIFEST), text, MANIFEST, complete ? `workflow v${pluginVersion}` : "kept ownership after partial setup");
   }
 
   if (!dryRun && !sync) {
